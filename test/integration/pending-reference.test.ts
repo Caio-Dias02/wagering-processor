@@ -203,4 +203,36 @@ describe("worker de PENDING_REFERENCE", () => {
         expect(resolvedByA + resolvedByB).toBe(12);
         for (const wallet of wallets) expect(await balanceOf(wallet.id)).toBe("100.00");
     });
+
+    test("replay de uma pendente durante a resolução: só leitura, sem deadlock", async () => {
+        // O worker trava pendente → wallet. Se o replay pela API atualizasse a pendente
+        // (wallet → pendente), as ordens se cruzariam e o Postgres abortaria uma das duas
+        // com deadlock_detected, e algum execute() abaixo lançaria erro.
+        const wallet = await newWallet();
+        const refunds: ProcessWagerTransactionCommand[] = [];
+        for (let i = 0; i < 5; i++) {
+            const betId = Bun.randomUUIDv7();
+            const refund = command(wallet, { kind: "REFUND", referenceExternalTransactionId: betId });
+            await processTx.execute(refund);
+            await processTx.execute(command(wallet, { externalTransactionId: betId }));
+            refunds.push(refund);
+        }
+        const ids = new Map<string, string>();
+        for (const refund of refunds) ids.set(refund.idempotencyKey, (await processTx.execute(refund)).transactionId);
+
+        const drainAll = async () => {
+            const resolver = new ResolvePendingReference(uow, IMMEDIATE);
+            while ((await resolver.execute()) !== "none") { /* próxima */ }
+        };
+        const replays = refunds.flatMap((r) => Array.from({ length: 10 }, () => processTx.execute(r)));
+        const [results] = await Promise.all([Promise.all(replays), drainAll(), drainAll()]);
+
+        for (const [i, result] of results.entries()) {
+            expect(result.idempotentReplay).toBe(true);
+            expect(result.transactionId).toBe(ids.get(refunds[Math.floor(i / 10)]!.idempotencyKey)!);
+            expect([WagerTransactionStatus.PendingReference, WagerTransactionStatus.Processed]).toContain(result.status);
+        }
+        for (const id of ids.values()) expect((await transaction(id)).status).toBe("PROCESSED");
+        expect(await balanceOf(wallet.id)).toBe("100.00");
+    });
 });
