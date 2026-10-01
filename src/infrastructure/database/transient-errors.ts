@@ -29,6 +29,19 @@ const TRANSIENT_SQLSTATES = new Set([
 ]);
 
 /**
+ * Conexão perdida no meio do caminho (o Postgres caiu com as conexões do pool abertas).
+ * O driver `pg` e o knex lançam esses erros SEM código nenhum, só com a mensagem:
+ * é o único jeito de reconhecê-los. Lista explícita, para não tratar qualquer
+ * erro desconhecido como "pode repetir".
+ */
+const CONNECTION_LOST_MESSAGES = [
+    "Connection terminated unexpectedly", // pg: o socket fechou com a query em andamento
+    "Connection terminated", // pg: conexão encerrada (ex.: servidor desligando)
+    "Client has encountered a connection error and is not queryable", // pg: conexão já quebrada
+    "Transaction query already complete", // knex: a transação morreu junto com a conexão
+];
+
+/**
  * O erro é passageiro? (banco caiu, deadlock, pool esgotado...)
  * Nesses casos nada foi decidido de forma definitiva e o cliente pode reenviar.
  */
@@ -44,6 +57,7 @@ export function isTransientDatabaseError(error: unknown): boolean {
 
     // Pool sem conexão livre dentro do tempo limite.
     if (error.name === "KnexTimeoutError") return true;
+    if (CONNECTION_LOST_MESSAGES.some((m) => error.message.startsWith(m))) return true;
 
     const code = (error as { code?: unknown }).code;
     return typeof code === "string" && (NETWORK_CODES.has(code) || TRANSIENT_SQLSTATES.has(code));
