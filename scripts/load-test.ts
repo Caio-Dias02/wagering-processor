@@ -3,7 +3,8 @@
  *
  * Bate numa aplicação JÁ RODANDO (local ou `docker compose --profile app up --scale app=3`)
  * e mede duas coisas:
- *  1. desempenho: requisições por segundo, latência p50/p95/p99, status devolvidos;
+ *  1. desempenho: requisições por segundo, latência p50/p95/p99, taxa de erro, status
+ *     devolvidos e, lidos do /metrics da aplicação, conflitos de concorrência e outbox lag;
  *  2. correção sob carga: no fim, o saldo de cada wallet tem que bater com a soma
  *     do que as respostas disseram ter acontecido. Velocidade sem conferência não
  *     prova nada num sistema financeiro.
@@ -124,6 +125,60 @@ async function http(method: string, path: string, body?: unknown, headers: Recor
     } catch {
         return { status: 0, body: null };
     }
+}
+
+// ---------- métricas da própria aplicação (GET /metrics, formato Prometheus) ----------
+
+const CONFLICTS_METRIC = "concurrency_conflicts_total";
+
+/** Soma todas as séries (todos os labels) de uma métrica no /metrics de uma instância. */
+async function readMetric(target: string, name: string): Promise<number> {
+    const text = await fetch(`${target}/metrics`).then((r) => r.text()).catch(() => "");
+    let total = 0;
+    for (const line of text.split("\n")) {
+        if (line.startsWith(`${name} `) || line.startsWith(`${name}{`)) {
+            total += Number(line.slice(line.lastIndexOf(" ") + 1));
+        }
+    }
+    return total;
+}
+
+/** Contadores são por instância: o total é a soma de todas. */
+async function sumAcrossTargets(name: string): Promise<number> {
+    const values = await Promise.all(config.targets.map((t) => readMetric(t, name)));
+    return values.reduce((a, b) => a + b, 0);
+}
+
+/**
+ * Os gauges da outbox são lidos do banco (compartilhado) a cada coleta,
+ * então basta perguntar a uma instância.
+ */
+const outbox = { maxLagSeconds: 0, maxPending: 0 };
+
+async function sampleOutbox(): Promise<number> {
+    const target = config.targets[0]!;
+    const [lag, pending] = await Promise.all([
+        readMetric(target, "outbox_lag_seconds"),
+        readMetric(target, "outbox_pending_messages"),
+    ]);
+    outbox.maxLagSeconds = Math.max(outbox.maxLagSeconds, lag);
+    outbox.maxPending = Math.max(outbox.maxPending, pending);
+    return pending;
+}
+
+/** Amostra a outbox a cada segundo até a função devolvida ser chamada. */
+function startOutboxSampling(): () => Promise<void> {
+    let running = true;
+    const loop = (async () => {
+        while (running) {
+            await sampleOutbox();
+            await Bun.sleep(1_000);
+        }
+    })();
+    return async () => {
+        running = false;
+        await loop;
+    };
 }
 
 // ---------- métricas da fase de carga ----------
@@ -334,6 +389,17 @@ async function waitForPending(): Promise<void> {
     for (const tx of pending) problems.push(`${tx.kind} ${tx.externalId}: still pending after ${config.pendingTimeoutMs}ms`);
 }
 
+/** Evento confirmado não pode se perder: espera a outbox esvaziar. Devolve os segundos desde `since`. */
+async function waitForOutboxDrain(since: number): Promise<number | undefined> {
+    const deadline = Date.now() + config.pendingTimeoutMs;
+    while (Date.now() < deadline) {
+        if ((await sampleOutbox()) === 0) return (performance.now() - since) / 1000;
+        await Bun.sleep(500);
+    }
+    problems.push(`outbox still has pending events after ${config.pendingTimeoutMs}ms`);
+    return undefined;
+}
+
 /** Rejeições que este tráfego provoca de propósito. Qualquer outra é bug. */
 const EXPECTED_FAILURES = new Set(["INSUFFICIENT_FUNDS", "REFERENCE_NOT_PROCESSED", "REFERENCE_ALREADY_REVERSED"]);
 
@@ -395,11 +461,21 @@ function percentile(sorted: number[], p: number): number {
     return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)]!;
 }
 
-function report(seconds: number): void {
+interface AppMetrics {
+    conflicts: number;
+    drainSeconds: number | undefined;
+}
+
+function report(seconds: number, app: AppMetrics): void {
     const sorted = [...latencies].sort((a, b) => a - b);
     const ms = (v: number) => `${v.toFixed(1)} ms`;
     const outcomes = new Map<string, number>();
     for (const tx of sent) count(outcomes, tx.status === "REJECTED" ? `REJECTED ${tx.failureCode}` : (tx.status ?? "unknown"));
+
+    // Erro = tudo que não é desfecho do contrato (200 / 202 / 422): 503, 5xx, 4xx inesperado, rede.
+    const errors = [...statusCounts].filter(([k]) => !["200", "202", "422"].includes(k)).reduce((n, [, v]) => n + v, 0);
+    const errorRate = latencies.length === 0 ? 0 : (errors / latencies.length) * 100;
+    const drained = app.drainSeconds === undefined ? "NÃO esvaziou" : `esvaziou ${app.drainSeconds.toFixed(1)} s após o fim da carga`;
 
     console.log(`
 == Teste de carga ==
@@ -410,7 +486,10 @@ duração        ${seconds.toFixed(2)} s
 throughput     ${(latencies.length / seconds).toFixed(1)} req/s
 latência       p50 ${ms(percentile(sorted, 50))} · p95 ${ms(percentile(sorted, 95))} · p99 ${ms(percentile(sorted, 99))} · máx ${ms(sorted.at(-1) ?? 0)}
 status HTTP    ${[...statusCounts].map(([k, v]) => `${k}: ${v}`).join(" · ")}
+taxa de erro   ${errorRate.toFixed(2)}% (${errors} de ${latencies.length} requisições; ${retries} reenviadas com a mesma key)
 desfechos      ${[...outcomes].sort().map(([k, v]) => `${k}: ${v}`).join(" · ")}
+conflitos      ${app.conflicts} (${CONFLICTS_METRIC}: corridas perdidas em unique/version que levaram a repetir)
+outbox         lag máx ${outbox.maxLagSeconds.toFixed(2)} s · pendentes máx ${outbox.maxPending} · ${drained}
 `);
 
     if (problems.length === 0) {
@@ -428,8 +507,16 @@ export { }; // top-level await exige que o arquivo seja um módulo
 
 await checkTargets();
 const wallets = await createWallets();
+const conflictsBefore = await sumAcrossTargets(CONFLICTS_METRIC);
+const stopSampling = startOutboxSampling();
+
 const seconds = await runLoad(wallets);
+const loadEnded = performance.now();
 await waitForPending();
+const drainSeconds = await waitForOutboxDrain(loadEnded);
+await stopSampling();
+const conflicts = (await sumAcrossTargets(CONFLICTS_METRIC)) - conflictsBefore;
+
 await verify(wallets);
-report(seconds);
+report(seconds, { conflicts, drainSeconds });
 process.exit(problems.length === 0 ? 0 : 1);
