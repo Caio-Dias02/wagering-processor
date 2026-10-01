@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { MikroORM } from "@mikro-orm/postgresql";
 import { Money } from "../../src/domain/money/money";
-import { WagerTransaction } from "../../src/domain/wager-transaction/wager-transaction";
+import { WagerTransaction, WagerTransactionKind } from "../../src/domain/wager-transaction/wager-transaction";
 import { Wallet } from "../../src/domain/wallet/wallet";
 import config from "../../src/infrastructure/database/mikro-orm.config";
 import { MikroOrmUnitOfWork } from "../../src/infrastructure/database/mikro-orm-unit-of-work";
@@ -78,10 +78,10 @@ describe("persistência", () => {
         const connection = orm.em.getConnection();
         await expect(
             connection.execute("update wallet_ledger_entries set created_at = now() where id = ?", [openingEntry.id]),
-        ).rejects.toThrow();
+        ).rejects.toThrow("UPDATE on wallet_ledger_entries is not allowed (append-only)");
         await expect(
             connection.execute("delete from wallet_ledger_entries where id = ?", [openingEntry.id]),
-        ).rejects.toThrow();
+        ).rejects.toThrow("DELETE on wallet_ledger_entries is not allowed (append-only)");
     });
 
     test("o banco recusa idempotency_key duplicada", async () => {
@@ -100,7 +100,9 @@ describe("persistência", () => {
             createdAt: new Date(),
         });
 
-        await expect(uow.run((ctx) => ctx.transactions.insert(duplicate))).rejects.toThrow();
+        await expect(uow.run((ctx) => ctx.transactions.insert(duplicate))).rejects.toThrow(
+            "wager_tx_idempotency_key_uq",
+        );
     });
 
     test("save com version desatualizada é recusado", async () => {
@@ -117,5 +119,40 @@ describe("persistência", () => {
                 await ctx.wallets.save(w, 999); // version errada de propósito
             }),
         ).rejects.toThrow("changed concurrently");
+    });
+
+    test("o banco recusa alterar campos de negócio de uma transação pendente", async () => {
+        const { wallet } = newWallet("10.00");
+        const externalId = Bun.randomUUIDv7();
+        const bet = WagerTransaction.create({
+            id: Bun.randomUUIDv7(),
+            providerId: "provider-a",
+            externalTransactionId: externalId,
+            idempotencyKey: `provider-a:${externalId}`,
+            payloadHash: "hash",
+            walletId: wallet.id,
+            playerId: wallet.playerId,
+            roundId: "round-1",
+            gameId: "game-1",
+            kind: WagerTransactionKind.Bet,
+            money: Money.from({ amount: "5.00", currency: "BRL" }),
+            createdAt: new Date(),
+        });
+        await uow.run(async (ctx) => {
+            await ctx.wallets.insert(wallet);
+            await ctx.transactions.insert(bet);
+        });
+
+        const connection = orm.em.getConnection();
+        const changes: [column: string, value: string][] = [
+            ["round_id", "outro-round"],
+            ["game_id", "outro-game"],
+            ["amount", "6.00"],
+        ];
+        for (const [column, value] of changes) {
+            await expect(
+                connection.execute(`update wager_transactions set ${column} = ? where id = ?`, [value, bet.id]),
+            ).rejects.toThrow("are immutable");
+        }
     });
 });
