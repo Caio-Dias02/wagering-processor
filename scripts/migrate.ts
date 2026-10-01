@@ -1,5 +1,5 @@
 import { MikroORM } from "@mikro-orm/postgresql";
-import config from "../src/infrastructure/database/mikro-orm.config.ts";
+import config from "../src/infrastructure/database/mikro-orm.config";
 
 const command = process.argv[2] ?? "up";
 const orm = await MikroORM.init(config);

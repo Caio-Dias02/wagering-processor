@@ -12,6 +12,7 @@
     "start": "bun src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:load": "bun scripts/load-test.ts",
     "db:migrate": "bun scripts/migrate.ts up",
     "db:rollback": "bun scripts/migrate.ts down",
     "db:migration:create": "bun scripts/migrate.ts create",
