@@ -49,6 +49,10 @@ describe("WagerTransaction", () => {
       expect(() => tx({ kind: Kind.Opening })).toThrow(InvalidWagerTransactionError);
     });
 
+    test("provedor não pode se passar pelo provider interno", () => {
+      expect(() => tx({ providerId: "internal" })).toThrow(InvalidWagerTransactionError);
+    });
+
     test("REFUND e ROLLBACK exigem referência", () => {
       expect(() => tx({ kind: Kind.Refund })).toThrow(InvalidWagerTransactionError);
       expect(() => tx({ kind: Kind.Rollback })).toThrow(InvalidWagerTransactionError);

@@ -49,6 +49,9 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
     processedAt?: Date;
 }
 
+/** Provider reservado para transações internas (OPENING). O banco também garante isso. */
+export const INTERNAL_PROVIDER_ID = "internal";
+
 /** Quais kinds cada operação pode referenciar. */
 const ALLOWED_REFERENCES: Partial<Record<WagerTransactionKind, readonly WagerTransactionKind[]>> = {
     [WagerTransactionKind.Win]: [WagerTransactionKind.Bet],
@@ -116,6 +119,9 @@ export class WagerTransaction {
         if (props.kind === WagerTransactionKind.Opening) {
             throw new InvalidWagerTransactionError("OPENING is internal and cannot be submitted");
         }
+        if (props.providerId === INTERNAL_PROVIDER_ID) {
+            throw new InvalidWagerTransactionError(`providerId "${INTERNAL_PROVIDER_ID}" is reserved`);
+        }
         WagerTransaction.validate(props);
         return new WagerTransaction({ ...props, status: WagerTransactionStatus.Pending });
     }
@@ -130,7 +136,7 @@ export class WagerTransaction {
     }): WagerTransaction {
         return new WagerTransaction({
             id: props.id,
-            providerId: "internal",
+            providerId: INTERNAL_PROVIDER_ID,
             externalTransactionId: `opening:${props.walletId}`,
             idempotencyKey: `internal:opening:${props.walletId}`,
             payloadHash: "",
