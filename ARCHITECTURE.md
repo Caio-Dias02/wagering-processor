@@ -347,6 +347,8 @@ Desenho pretendido:
 | `ROLLBACK`/`REFUND` antes da referência | `pending-reference.test.ts` |
 | Replay de pendente enquanto o worker resolve (sem deadlock) | `pending-reference.test.ts` |
 | SQS travado durante a publicação da outbox | `test/unit/sqs-event-publisher.test.ts` (prazo por chamada) |
+| Mesma key pela API e pela fila | `sqs-consumer.test.ts` (API→fila e fila→API viram replay; payload diferente → DLQ `IDEMPOTENCY_CONFLICT`) |
+| Postgres caindo com conexões abertas → 503 | `test/unit/transient-errors.test.ts` + conferência real abaixo |
 | Reinício com consistência final | `multi-instance.test.ts`: instância morta à força sob carga, outra sobe, todas as wallets reconciliam e a outbox esvazia |
 | Crash depois do commit e antes de publicar | `outbox.test.ts` |
 | Shutdown gracioso do consumer | `sqs-consumer.test.ts` |
@@ -354,6 +356,21 @@ Desenho pretendido:
 | Carga com conferência de saldo | `scripts/load-test.ts` (`bun run test:load`, abaixo) |
 
 Os testes compartilham o mesmo banco; cada um cria suas próprias wallets com ids únicos.
+
+### Indisponibilidade real (Postgres e SQS)
+
+Conferência manual com a aplicação rodando e os containers derrubados de verdade com `docker stop`:
+
+| Situação | Resultado observado |
+|---|---|
+| **Postgres fora** | Apostas respondem `503` + `Retry-After: 1` (`TEMPORARILY_UNAVAILABLE`) em menos de 15 ms, sem travar. `/health/ready` responde `503` com `postgres: down` e `/health/live` responde `200`, então o orquestrador não reinicia o processo à toa. |
+| **Postgres de volta** | O reenvio com a mesma key é processado normalmente, e um novo reenvio vira replay com o saldo original. A reconciliação fica consistente. |
+| **SQS fora** | Apostas pela API continuam respondendo `200`: o evento fica na outbox, que cresce (6 pendentes, lag de 5 s). `/health/ready` responde `503` com `sqs: down`. |
+| **SQS de volta** | A outbox esvazia em ~2 s sem intervenção, e o consumer volta a processar a fila (mensagem nova processada em ~1 s). |
+
+Essa conferência **achou um bug**, já corrigido. Quando o Postgres cai com as conexões do pool já abertas, o driver `pg` lança `Connection terminated unexpectedly` **sem código** (nem SQLSTATE, nem `ECONNRESET`), e a API respondia `500` em vez de `503`. O teste automatizado só cobria o banco recusando conexões novas (`ECONNREFUSED`). O classificador (`transient-errors.ts`) agora reconhece também essas mensagens, numa lista explícita, e um teste unitário cobre os dois lados: o que é e o que não é transitório. A correção financeira nunca esteve em risco, porque a transação era desfeita do mesmo jeito; o problema era só o status, que não dizia ao provedor que ele podia reenviar.
+
+Limitação do ambiente: o LocalStack não persiste estado, então mensagens que estavam **na fila** no momento do `docker stop` se perdem com ele. No SQS real a fila é durável. O que está do nosso lado (a outbox) não perde nada.
 
 ### Teste de carga
 
