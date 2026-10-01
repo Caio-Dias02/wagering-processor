@@ -273,3 +273,64 @@ describe("consumer SQS", () => {
         expect(await balanceOf(wallet.id)).toBe("70.00");
     });
 });
+
+/**
+ * A idempotência é da TRANSAÇÃO, não do canal: o provedor pode mandar pela API e
+ * reenviar pela fila (ou o contrário). A key é a mesma, então o segundo é replay.
+ * A API chama este mesmo caso de uso com o comando já validado (source "http").
+ */
+describe("idempotência entre API e fila", () => {
+    function viaApi(msg: ReturnType<typeof message>) {
+        return processTx.execute({ ...msg.data, source: "http" });
+    }
+
+    test("primeiro pela API, depois pela fila: a fila vira replay e debita uma vez só", async () => {
+        const wallet = await newWallet();
+        const msg = message(wallet);
+        const first = await viaApi(msg);
+        expect(first).toMatchObject({ status: "PROCESSED", idempotentReplay: false });
+
+        const results: { transactionId: string; idempotentReplay: boolean }[] = [];
+        await send(msg, wallet.id);
+        await drain(consumerWith({
+            execute: async (...args) => {
+                const result = await processTx.execute(...args);
+                results.push(result);
+                return result;
+            },
+        }));
+
+        expect(results).toEqual([expect.objectContaining({ transactionId: first.transactionId, idempotentReplay: true })]);
+        expect(await debits(wallet.id)).toBe(1);
+        expect(await balanceOf(wallet.id)).toBe("90.00");
+        expect(await queueDepth(queueUrl)).toBe(0); // ack: replay é sucesso
+        expect(await deadLetters()).toHaveLength(0);
+    });
+
+    test("primeiro pela fila, depois pela API: a API devolve o resultado original", async () => {
+        const wallet = await newWallet();
+        const msg = message(wallet);
+        await send(msg, wallet.id);
+        await drain(consumerWith());
+
+        const replay = await viaApi(msg);
+
+        expect(replay).toMatchObject({ status: "PROCESSED", idempotentReplay: true });
+        expect(replay.balance?.toString()).toBe("90.00"); // saldo observado na 1ª vez
+        expect(await debits(wallet.id)).toBe(1);
+    });
+
+    test("mesma key com payload diferente na fila: conflito vai para a DLQ, sem novo débito", async () => {
+        const wallet = await newWallet();
+        const msg = message(wallet);
+        await viaApi(msg);
+
+        const changed = { ...msg, messageId: Bun.randomUUIDv7(), data: { ...msg.data, money: { amount: "20.00", currency: "BRL" } } };
+        await send(changed, wallet.id);
+        await drain(consumerWith());
+
+        expect((await deadLetters()).map((d) => d.code)).toEqual(["IDEMPOTENCY_CONFLICT"]);
+        expect(await debits(wallet.id)).toBe(1);
+        expect(await balanceOf(wallet.id)).toBe("90.00");
+    });
+});
