@@ -1,9 +1,10 @@
 import { type EntityManager, type MikroORM, UniqueConstraintViolationException } from "@mikro-orm/postgresql";
-import { ConcurrencyConflictError } from "../../application/errors";
+import { ConcurrencyConflictError, TransientInfrastructureError } from "../../application/errors";
 import type { TransactionalContext, UnitOfWork } from "../../application/ports/repositories";
 import { MikroOrmLedgerRepository } from "./repositories/mikro-orm-ledger.repository";
 import { MikroOrmWagerTransactionRepository } from "./repositories/mikro-orm-wager-transaction.repository";
 import { MikroOrmWalletRepository } from "./repositories/mikro-orm-wallet.repository";
+import { isTransientDatabaseError } from "./transient-errors";
 
 export class MikroOrmUnitOfWork implements UnitOfWork {
     constructor(private readonly orm: MikroORM) { }
@@ -18,6 +19,9 @@ export class MikroOrmUnitOfWork implements UnitOfWork {
             if (error instanceof UniqueConstraintViolationException) {
                 const constraint = (error as { constraint?: string }).constraint ?? "unknown";
                 throw new ConcurrencyConflictError(`Unique constraint violated: ${constraint}`, { cause: error });
+            }
+            if (isTransientDatabaseError(error)) {
+                throw new TransientInfrastructureError("Database temporarily unavailable", { cause: error });
             }
             throw error;
         }

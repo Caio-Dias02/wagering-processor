@@ -13,6 +13,11 @@ export class MikroOrmWalletRepository implements WalletRepository {
         return record ? WalletMapper.toDomain(record) : null;
     }
 
+    async findByPlayerAndCurrency(playerId: string, currency: string): Promise<Wallet | null> {
+        const record = await this.em.findOne(WalletRecord, { playerId, currency });
+        return record ? WalletMapper.toDomain(record) : null;
+    }
+
     async findByIdForUpdate(id: string): Promise<Wallet | null> {
         const record = await this.em.findOne(
             WalletRecord,

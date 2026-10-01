@@ -1,50 +1,37 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { MikroORM } from "@mikro-orm/postgresql";
 import { IdempotencyConflictError, WalletNotFoundError } from "../../src/application/errors";
+import { CreateWallet } from "../../src/application/use-cases/create-wallet";
 import {
     ProcessWagerTransaction,
     type ProcessWagerTransactionCommand,
 } from "../../src/application/use-cases/process-wager-transaction";
-import { Money } from "../../src/domain/money/money";
 import { FailureCode } from "../../src/domain/wager-transaction/failure-code";
-import { WagerTransaction, WagerTransactionStatus as Status } from "../../src/domain/wager-transaction/wager-transaction";
+import { WagerTransactionStatus as Status } from "../../src/domain/wager-transaction/wager-transaction";
 import { InvalidWagerTransactionError } from "../../src/domain/wager-transaction/wager-transaction.errors";
-import { Wallet } from "../../src/domain/wallet/wallet";
+import type { Wallet } from "../../src/domain/wallet/wallet";
 import config from "../../src/infrastructure/database/mikro-orm.config";
 import { MikroOrmUnitOfWork } from "../../src/infrastructure/database/mikro-orm-unit-of-work";
 
 let orm: MikroORM;
 let uow: MikroOrmUnitOfWork;
 let useCase: ProcessWagerTransaction;
+let walletFactory: CreateWallet;
 
 beforeAll(async () => {
     orm = await MikroORM.init({ ...config, pool: { min: 2, max: 20 } });
     await orm.migrator.up();
     uow = new MikroOrmUnitOfWork(orm);
     useCase = new ProcessWagerTransaction(uow);
+    walletFactory = new CreateWallet(uow);
 });
 
 afterAll(async () => {
     await orm.close(true);
 });
 
-/** Cria a wallet direto pelos repositórios (o CreateWallet ainda não existe). */
-async function createWallet(amount: string, currency = "BRL") {
-    const now = new Date();
-    const walletId = Bun.randomUUIDv7();
-    const playerId = Bun.randomUUIDv7();
-    const money = Money.from({ amount, currency });
-    const opening = WagerTransaction.createOpening({ id: Bun.randomUUIDv7(), walletId, playerId, money, createdAt: now });
-    const { wallet, openingEntry } = Wallet.open({
-        id: walletId, playerId, initialBalance: money,
-        openingTransactionId: opening.id, openingEntryId: Bun.randomUUIDv7(), at: now,
-    });
-    await uow.run(async (ctx) => {
-        await ctx.wallets.insert(wallet);
-        await ctx.transactions.insert(opening);
-        if (openingEntry) await ctx.ledger.insert(openingEntry);
-    });
-    return wallet;
+function createWallet(amount: string, currency = "BRL"): Promise<Wallet> {
+    return walletFactory.execute({ playerId: Bun.randomUUIDv7(), initialBalance: { amount, currency } });
 }
 
 /** Monta um comando válido; `overrides` troca só o que o teste quer. */

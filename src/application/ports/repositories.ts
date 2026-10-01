@@ -7,6 +7,7 @@ import type {
 
 export interface WalletRepository {
     findById(id: string): Promise<Wallet | null>;
+    findByPlayerAndCurrency(playerId: string, currency: string): Promise<Wallet | null>;
     /** Busca travando a linha (SELECT ... FOR UPDATE) até o fim da transação. */
     findByIdForUpdate(id: string): Promise<Wallet | null>;
     insert(wallet: Wallet): Promise<void>;

@@ -8,9 +8,10 @@ import {
 import { InvalidWagerTransactionError } from "../../domain/wager-transaction/wager-transaction.errors";
 import type { Wallet } from "../../domain/wallet/wallet";
 import { LedgerDirection, type WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
-import { ConcurrencyConflictError, IdempotencyConflictError, WalletNotFoundError } from "../errors";
+import { IdempotencyConflictError, WalletNotFoundError } from "../errors";
 import { payloadHash } from "../payload-hash";
 import type { TransactionalContext, UnitOfWork } from "../ports/repositories";
+import { retryOnConflict } from "../retry";
 
 /** O que chega da API ou da fila (já sem nada de HTTP/SQS). */
 export interface ProcessWagerTransactionCommand {
@@ -35,9 +36,6 @@ export interface ProcessWagerTransactionResult {
     idempotentReplay: boolean;
 }
 
-/** Quantas vezes repetimos quando outra transação ganha a corrida. */
-const MAX_ATTEMPTS = 3;
-
 export class ProcessWagerTransaction {
     constructor(
         private readonly uow: UnitOfWork,
@@ -51,7 +49,9 @@ export class ProcessWagerTransaction {
         const kind = parseKind(command.kind);
         const money = Money.from(command.money);
 
-        for (let attempt = 1; ; attempt++) {
+        // Se outra transação ganhar a corrida, repetimos numa NOVA transação. Na próxima
+        // volta quem ganhou já está gravado, e caímos em replay ou conflito.
+        return retryOnConflict(() => {
             const incoming = WagerTransaction.create({
                 id: this.newId(),
                 providerId: command.providerId,
@@ -67,16 +67,8 @@ export class ProcessWagerTransaction {
                 referenceExternalTransactionId: command.referenceExternalTransactionId,
                 createdAt: this.now(),
             });
-
-            try {
-                return await this.uow.run((ctx) => this.process(ctx, incoming));
-            } catch (error) {
-                // A transação SQL abortou inteira; repetimos numa NOVA. Na próxima volta
-                // quem ganhou a corrida já está gravado, e caímos em replay ou conflito.
-                if (error instanceof ConcurrencyConflictError && attempt < MAX_ATTEMPTS) continue;
-                throw error;
-            }
-        }
+            return this.uow.run((ctx) => this.process(ctx, incoming));
+        });
     }
 
     private async process(ctx: TransactionalContext, tx: WagerTransaction): Promise<ProcessWagerTransactionResult> {
