@@ -151,7 +151,7 @@ Filas (criadas por `docker/localstack/init-sqs.sh`): `wager-transactions.fifo` (
 
 ## Configuração
 
-Todas as variáveis têm padrão para o ambiente local do `docker compose`.
+Todas as variáveis têm padrão para o ambiente local do `docker compose`, então nenhum `.env` é necessário. Para mudar algo, copie o [`.env.example`](.env.example) para `.env` (o Bun lê automaticamente) e ajuste.
 
 | Variável | Padrão | Descrição |
 |---|---|---|
