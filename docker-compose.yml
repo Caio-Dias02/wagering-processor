@@ -24,8 +24,11 @@ services:
       AWS_DEFAULT_REGION: us-east-1
     ports:
       - "4566:4566"
+    volumes:
+      - ./docker/localstack/init-sqs.sh:/etc/localstack/init/ready.d/init-sqs.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health"]
+      # saudável só depois do init: as filas já existem
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
       interval: 5s
       timeout: 3s
       retries: 20

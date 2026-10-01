@@ -244,4 +244,10 @@ describe("consultas", () => {
     test("health/live responde sem autenticação", async () => {
         expect((await call("GET", "/health/live")).status).toBe(200);
     });
+
+    test("health/ready confere Postgres e SQS", async () => {
+        const { status, body } = await call("GET", "/health/ready");
+        expect(status).toBe(200);
+        expect(body).toEqual({ status: "ok", checks: { postgres: "up", sqs: "up" } });
+    });
 });
