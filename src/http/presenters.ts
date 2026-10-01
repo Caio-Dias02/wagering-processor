@@ -52,6 +52,8 @@ export function presentTransaction(t: WagerTransaction) {
     };
 }
 
+const MAX_BIGINT = 9_223_372_036_854_775_807n;
+
 /**
  * Cursor opaco do ledger: por baixo é o `seq` (bigserial), mas o cliente não
  * deve depender disso. Base64url permite trocar a implementação sem quebrar ninguém.
@@ -62,7 +64,8 @@ export const ledgerCursor = {
     },
     /** undefined se o cursor for inválido. */
     decode(cursor: string): string | undefined {
-        const match = /^seq:(\d{1,19})$/.exec(Buffer.from(cursor, "base64url").toString());
-        return match?.[1];
+        const seq = /^seq:(\d{1,19})$/.exec(Buffer.from(cursor, "base64url").toString())?.[1];
+        // 19 dígitos ainda podem passar do maior bigint do Postgres.
+        return seq !== undefined && BigInt(seq) <= MAX_BIGINT ? seq : undefined;
     },
 };

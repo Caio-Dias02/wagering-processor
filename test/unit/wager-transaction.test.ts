@@ -49,6 +49,12 @@ describe("WagerTransaction", () => {
       expect(() => tx({ kind: Kind.Opening })).toThrow(InvalidWagerTransactionError);
     });
 
+    test("não pode referenciar a si mesma", () => {
+      expect(() => tx({ kind: Kind.Refund, referenceExternalTransactionId: "ext-1" })).toThrow(
+        InvalidWagerTransactionError,
+      );
+    });
+
     test("provedor não pode se passar pelo provider interno", () => {
       expect(() => tx({ providerId: "internal" })).toThrow(InvalidWagerTransactionError);
     });
@@ -139,12 +145,12 @@ describe("WagerTransaction", () => {
     test("BET debita; WIN e REFUND creditam", () => {
       expect(bet.ledgerDirectionFor()).toBe(LedgerDirection.Debit);
       expect(win.ledgerDirectionFor()).toBe(LedgerDirection.Credit);
-      expect(tx({ kind: Kind.Refund, referenceExternalTransactionId: "ext-1" }).ledgerDirectionFor())
+      expect(tx({ externalTransactionId: "ext-r", kind: Kind.Refund, referenceExternalTransactionId: "ext-1" }).ledgerDirectionFor())
         .toBe(LedgerDirection.Credit);
     });
 
     test("ROLLBACK é o inverso da referência", () => {
-      const rollback = tx({ id: "tx-r", kind: Kind.Rollback, referenceExternalTransactionId: "ext-1" });
+      const rollback = tx({ id: "tx-r", externalTransactionId: "ext-r", kind: Kind.Rollback, referenceExternalTransactionId: "ext-1" });
       expect(rollback.ledgerDirectionFor(bet)).toBe(LedgerDirection.Credit);
       expect(rollback.ledgerDirectionFor(win)).toBe(LedgerDirection.Debit);
     });

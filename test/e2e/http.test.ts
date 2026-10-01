@@ -164,6 +164,7 @@ describe("POST /wagering/transactions", () => {
             transaction(wallet, { providerId: "internal" }),
             transaction(wallet, { walletId: "not-a-uuid" }),
             transaction(wallet, { kind: "REFUND" }), // sem referência
+            transaction(wallet, { roundId: "a\u0000b" }), // NUL: o Postgres recusaria com 08P01
         ];
         for (const tx of invalid) {
             const { status } = await submit(tx);
@@ -222,6 +223,8 @@ describe("consultas", () => {
         expect((await call("GET", `/wallets/${wallet.id}/ledger?cursor=lixo`)).status).toBe(400);
         expect((await call("GET", `/wallets/${wallet.id}/ledger?limit=0`)).status).toBe(400);
         expect((await call("GET", `/wallets/${wallet.id}/ledger?limit=abc`)).status).toBe(400);
+        const beyondBigint = Buffer.from("seq:9999999999999999999").toString("base64url");
+        expect((await call("GET", `/wallets/${wallet.id}/ledger?cursor=${beyondBigint}`)).status).toBe(400);
         expect((await call("GET", `/wallets/${Bun.randomUUIDv7()}/ledger`)).status).toBe(404);
     });
 
@@ -239,6 +242,7 @@ describe("consultas", () => {
 
         expect((await call("GET", `/wagering/transactions/${Bun.randomUUIDv7()}`)).status).toBe(404);
         expect((await call("GET", "/providers/provider-a/wagering/transactions/nao-existe")).status).toBe(404);
+        expect((await call("GET", "/providers/p%00/wagering/transactions/x")).status).toBe(404);
     });
 
     test("health/live responde sem autenticação", async () => {

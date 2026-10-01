@@ -312,6 +312,10 @@ export class WagerTransaction {
         if (needsReference && !p.referenceExternalTransactionId) {
             throw new InvalidWagerTransactionError(`${p.kind} requires referenceExternalTransactionId`);
         }
+        if (p.referenceExternalTransactionId === p.externalTransactionId) {
+            // Nunca resolveria: ficaria em PENDING_REFERENCE para sempre.
+            throw new InvalidWagerTransactionError("A transaction cannot reference itself");
+        }
         if (p.kind === WagerTransactionKind.Bet && p.referenceExternalTransactionId) {
             throw new InvalidWagerTransactionError("BET cannot reference another transaction");
         }

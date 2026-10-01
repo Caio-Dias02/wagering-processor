@@ -1,7 +1,10 @@
 import { Money } from "../money/money";
 import { CurrencyMismatchError } from "../money/money.errors";
 import { LedgerDirection, WalletLedgerEntry } from "./wallet-ledger-entry";
-import { InsufficientFundsError, NonPositiveAmountError } from "./wallet.errors";
+import { BalanceLimitExceededError, InsufficientFundsError, NonPositiveAmountError } from "./wallet.errors";
+
+/** Maior saldo representável em NUMERIC(19,2), a coluna onde o saldo é guardado. */
+const MAX_BALANCE_AMOUNT = "99999999999999999.99";
 
 export interface WalletState {
     id: string;
@@ -100,7 +103,16 @@ export class Wallet {
 
     credit(movement: WalletMovement): WalletLedgerEntry {
         this.assertValidMovement(movement.money);
+        if (!this.canCredit(movement.money)) {
+            throw new BalanceLimitExceededError();
+        }
         return this.apply(LedgerDirection.Credit, movement);
+    }
+
+    /** O crédito cabe no limite de saldo? (Não valida moeda: isso é do credit.) */
+    canCredit(money: Money): boolean {
+        const max = Money.rehydrate({ amount: MAX_BALANCE_AMOUNT, currency: this.currency });
+        return !max.isLessThan(this._balance.add(money));
     }
 
     /** Único lugar que altera o saldo: sempre junto com o lançamento. */

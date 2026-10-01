@@ -20,9 +20,16 @@ export class InvalidInputError extends Error {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_TEXT = 255;
+// Caracteres de controle (inclui o NUL, que o Postgres não aceita em text).
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 export function isUuid(value: unknown): value is string {
     return typeof value === "string" && UUID.test(value);
+}
+
+/** Texto aceitável como identificador: não vazio, tamanho limitado, sem caracteres de controle. */
+export function isSafeText(value: unknown): value is string {
+    return typeof value === "string" && value.trim() !== "" && value.length <= MAX_TEXT && !CONTROL_CHARS.test(value);
 }
 
 export function parseCreateWalletInput(body: unknown): CreateWalletCommand {
@@ -71,6 +78,9 @@ class Reader {
         }
         if (value.length > MAX_TEXT) {
             this.issues.push(`${field} must have at most ${MAX_TEXT} characters`);
+        }
+        if (CONTROL_CHARS.test(value)) {
+            this.issues.push(`${field} must not contain control characters`);
         }
         return value;
     }

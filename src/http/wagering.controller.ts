@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, Inject, NotFoundException, Param, Post, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
-import { isUuid, parseWagerTransactionInput } from "../application/input-validation";
+import { isSafeText, isUuid, parseWagerTransactionInput } from "../application/input-validation";
 import { WageringQueries } from "../application/queries";
 import { ProcessWagerTransaction } from "../application/use-cases/process-wager-transaction";
 import { WagerTransactionStatus } from "../domain/wager-transaction/wager-transaction";
@@ -47,7 +47,10 @@ export class WageringController {
         @Param("providerId") providerId: string,
         @Param("externalTransactionId") externalTransactionId: string,
     ) {
-        const tx = await this.queries.getTransactionByExternalId(providerId, externalTransactionId);
+        // Texto que nunca passaria na validação de entrada não pode existir (e um NUL quebraria a query).
+        const tx = isSafeText(providerId) && isSafeText(externalTransactionId)
+            ? await this.queries.getTransactionByExternalId(providerId, externalTransactionId)
+            : null;
         if (!tx) throw new NotFoundException(`Transaction ${externalTransactionId} from ${providerId} not found`);
         return presentTransaction(tx);
     }

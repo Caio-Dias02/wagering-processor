@@ -74,16 +74,16 @@ export class ProcessWagerTransaction {
     private async process(ctx: TransactionalContext, tx: WagerTransaction): Promise<ProcessWagerTransactionResult> {
         // 1. Trava a wallet: daqui até o commit, ninguém mais mexe nela.
         const wallet = await ctx.wallets.findByIdForUpdate(tx.walletId);
-        if (!wallet) throw new WalletNotFoundError(tx.walletId);
+        if (!wallet) {
+            // Key já usada (com outra wallet, que existe) continua sendo conflito, não "wallet inexistente".
+            if (await this.findExisting(ctx, tx)) throw keyReusedWithDifferentPayload(tx);
+            throw new WalletNotFoundError(tx.walletId);
+        }
 
         // 2. Já vimos esse pedido? (com a wallet travada, a resposta não muda até o commit)
         const existing = await this.findExisting(ctx, tx);
         if (existing) {
-            if (!existing.matchesPayload(tx.payloadHash)) {
-                throw new IdempotencyConflictError(
-                    `Idempotency key ${tx.idempotencyKey} was already used with a different payload`,
-                );
-            }
+            if (!existing.matchesPayload(tx.payloadHash)) throw keyReusedWithDifferentPayload(tx);
             return toResult(existing, true);
         }
 
@@ -132,8 +132,10 @@ export class ProcessWagerTransaction {
             tx.reject(FailureCode.WalletOwnershipMismatch, undefined, at);
             return undefined;
         }
+        // Sem saldo também: observed_balance é relido na moeda da TRANSAÇÃO, e aqui
+        // a moeda da wallet é outra (o replay mostraria "100.00 USD" numa wallet BRL).
         if (wallet.currency !== tx.money.currency) {
-            tx.reject(FailureCode.CurrencyMismatch, wallet.balance, at);
+            tx.reject(FailureCode.CurrencyMismatch, undefined, at);
             return undefined;
         }
 
@@ -150,7 +152,7 @@ export class ProcessWagerTransaction {
                 return undefined;
             }
 
-            const problem = tx.checkReference(found) ?? (await this.checkNotReversed(ctx, tx, found));
+            const problem = tx.checkReference(found) ?? (await this.checkNotReversed(ctx, found));
             if (problem) {
                 tx.reject(problem, wallet.balance, at);
                 return undefined;
@@ -169,6 +171,10 @@ export class ProcessWagerTransaction {
             tx.reject(code, wallet.balance, at);
             return undefined;
         }
+        if (direction === LedgerDirection.Credit && !wallet.canCredit(tx.money)) {
+            tx.reject(FailureCode.BalanceLimitExceeded, wallet.balance, at);
+            return undefined;
+        }
 
         const movement = { entryId: this.newId(), transactionId: tx.id, money: tx.money, at };
         const entry = direction === LedgerDirection.Debit ? wallet.debit(movement) : wallet.credit(movement);
@@ -177,16 +183,15 @@ export class ProcessWagerTransaction {
     }
 
     /**
-     * Uma referência só pode ser revertida UMA vez, por qualquer tipo de reversão.
-     * O enunciado fala em "pelo mesmo tipo", mas REFUND depois de ROLLBACK da mesma BET
-     * devolveria o dinheiro duas vezes, então somos mais rígidos aqui.
+     * Referência já revertida não aceita mais nada:
+     *  - outra reversão, de QUALQUER tipo. O enunciado fala em "pelo mesmo tipo", mas
+     *    REFUND depois de ROLLBACK da mesma BET devolveria o dinheiro duas vezes;
+     *  - WIN/LOSS: não se liquida uma aposta que já foi cancelada.
      */
     private async checkNotReversed(
         ctx: TransactionalContext,
-        tx: WagerTransaction,
         reference: WagerTransaction,
     ): Promise<FailureCode | undefined> {
-        if (!tx.isReversal()) return undefined;
         for (const kind of [WagerTransactionKind.Refund, WagerTransactionKind.Rollback]) {
             if (await ctx.transactions.hasProcessedReversal(reference.id, kind)) {
                 return FailureCode.ReferenceAlreadyReversed;
@@ -209,6 +214,10 @@ function hashOf(c: ProcessWagerTransactionCommand): string {
         money: { amount: c.money.amount, currency: c.money.currency },
         referenceExternalTransactionId: c.referenceExternalTransactionId,
     });
+}
+
+function keyReusedWithDifferentPayload(tx: WagerTransaction): IdempotencyConflictError {
+    return new IdempotencyConflictError(`Idempotency key ${tx.idempotencyKey} was already used with a different payload`);
 }
 
 function parseKind(kind: string): WagerTransactionKind {

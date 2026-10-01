@@ -8,6 +8,14 @@ export class InsufficientFundsError extends DomainError {
     }
 }
 
+export class BalanceLimitExceededError extends DomainError {
+    readonly code = "BALANCE_LIMIT_EXCEEDED";
+
+    constructor() {
+        super("Balance limit exceeded");
+    }
+}
+
 export class NonPositiveAmountError extends DomainError {
     readonly code = "NON_POSITIVE_AMOUNT";
 }

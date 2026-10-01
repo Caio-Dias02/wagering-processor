@@ -157,6 +157,31 @@ describe("ProcessWagerTransaction: regras", () => {
         await expectConsistent(wallet.id, "100.00");
     });
 
+    test("WIN e LOSS não liquidam uma BET já revertida", async () => {
+        const wallet = await createWallet("100.00");
+        const bet = command(wallet);
+        await useCase.execute(bet);
+        await useCase.execute(command(wallet, { kind: "REFUND", referenceExternalTransactionId: bet.externalTransactionId }));
+
+        for (const kind of ["WIN", "LOSS"]) {
+            const result = await useCase.execute(command(wallet, {
+                kind, referenceExternalTransactionId: bet.externalTransactionId,
+            }));
+            expect(result.status).toBe(Status.Rejected);
+            expect(result.failureCode).toBe(FailureCode.ReferenceAlreadyReversed);
+        }
+        await expectConsistent(wallet.id, "100.00");
+    });
+
+    test("crédito que passaria do limite do saldo é rejeitado (e não vira 500)", async () => {
+        const wallet = await createWallet("99999999999999999.00");
+        const result = await useCase.execute(command(wallet, { kind: "WIN", money: { amount: "1.00", currency: "BRL" } }));
+
+        expect(result.status).toBe(Status.Rejected);
+        expect(result.failureCode).toBe(FailureCode.BalanceLimitExceeded);
+        await expectConsistent(wallet.id, "99999999999999999.00");
+    });
+
     test("ROLLBACK de WIN debita; sem saldo vira REVERSAL_INSUFFICIENT_FUNDS", async () => {
         const wallet = await createWallet("10.00");
         const bet = command(wallet);
@@ -201,11 +226,16 @@ describe("ProcessWagerTransaction: regras", () => {
         await expectConsistent(wallet.id, "100.00");
     });
 
-    test("moeda diferente da wallet é rejeitada", async () => {
+    test("moeda diferente da wallet é rejeitada, e o replay não inventa saldo em outra moeda", async () => {
         const wallet = await createWallet("100.00");
-        const result = await useCase.execute(command(wallet, { money: { amount: "10.00", currency: "USD" } }));
+        const usdBet = command(wallet, { money: { amount: "10.00", currency: "USD" } });
+        const result = await useCase.execute(usdBet);
 
         expect(result.failureCode).toBe(FailureCode.CurrencyMismatch);
+        expect(result.balance).toBeUndefined();
+        const replay = await useCase.execute(usdBet);
+        expect(replay.idempotentReplay).toBe(true);
+        expect(replay.balance).toBeUndefined();
         await expectConsistent(wallet.id, "100.00");
     });
 
@@ -264,6 +294,14 @@ describe("ProcessWagerTransaction: idempotência", () => {
         const tampered = { ...bet, money: { amount: "99.00", currency: "BRL" } };
         await expect(useCase.execute(tampered)).rejects.toBeInstanceOf(IdempotencyConflictError);
         await expectConsistent(wallet.id, "90.00");
+    });
+
+    test("key reaproveitada apontando para wallet inexistente é conflito, não WALLET_NOT_FOUND", async () => {
+        const wallet = await createWallet("100.00");
+        const bet = command(wallet);
+        await useCase.execute(bet);
+
+        await expect(useCase.execute({ ...bet, walletId: Bun.randomUUIDv7() })).rejects.toBeInstanceOf(IdempotencyConflictError);
     });
 
     test("mesmo externalTransactionId com outra key é conflito", async () => {

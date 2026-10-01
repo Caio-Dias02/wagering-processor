@@ -4,6 +4,7 @@ import { CurrencyMismatchError } from "../../src/domain/money/money.errors";
 import { Wallet, type WalletMovement } from "../../src/domain/wallet/wallet";
 import { LedgerDirection, WalletLedgerEntry } from "../../src/domain/wallet/wallet-ledger-entry";
 import {
+  BalanceLimitExceededError,
   InsufficientFundsError,
   NonPositiveAmountError,
   UnbalancedLedgerEntryError,
@@ -95,6 +96,16 @@ describe("Wallet", () => {
       expect(wallet.balance.toString()).toBe("60.00");
       expect(wallet.version).toBe(2);
       expect(entry.direction).toBe(LedgerDirection.Credit);
+    });
+
+    test("não passa do maior saldo que o banco guarda, e nada muda", () => {
+      const { wallet } = openWallet("99999999999999999.00");
+
+      expect(wallet.canCredit(brl("0.99"))).toBe(true);
+      expect(wallet.canCredit(brl("1.00"))).toBe(false);
+      expect(() => wallet.credit(movement("1.00"))).toThrow(BalanceLimitExceededError);
+      expect(wallet.balance.toString()).toBe("99999999999999999.00");
+      expect(wallet.version).toBe(1);
     });
   });
 

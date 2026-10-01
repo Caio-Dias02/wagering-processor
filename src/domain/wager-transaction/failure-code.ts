@@ -7,6 +7,7 @@ export const FailureCode = {
     // Saldo
     InsufficientFunds: "INSUFFICIENT_FUNDS",
     ReversalInsufficientFunds: "REVERSAL_INSUFFICIENT_FUNDS",
+    BalanceLimitExceeded: "BALANCE_LIMIT_EXCEEDED",
 
     // Referência
     ReferenceNotFound: "REFERENCE_NOT_FOUND",
