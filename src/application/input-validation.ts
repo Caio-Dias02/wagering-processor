@@ -60,6 +60,35 @@ export function parseWagerTransactionInput(body: unknown, idempotencyKey: unknow
     return command;
 }
 
+export const WAGER_TRANSACTION_REQUESTED = "WagerTransactionRequested";
+
+export interface WagerTransactionMessage {
+    messageId: string;
+    command: ProcessWagerTransactionCommand;
+}
+
+/**
+ * Mensagem da fila (§10): { messageId, type, occurredAt, data: {...} }.
+ * `data` passa pela MESMA validação do HTTP; a key vem em data.idempotencyKey.
+ */
+export function parseWagerTransactionMessage(body: unknown): WagerTransactionMessage {
+    const envelope = new Reader(body);
+    const messageId = envelope.text("messageId");
+    const type = envelope.text("type");
+    envelope.done();
+    if (type !== WAGER_TRANSACTION_REQUESTED) {
+        throw new InvalidInputError([`type must be ${WAGER_TRANSACTION_REQUESTED}`]);
+    }
+
+    const data = (body as Record<string, unknown>).data;
+    const idempotencyKey = typeof data === "object" && data !== null
+        ? (data as Record<string, unknown>).idempotencyKey
+        : undefined;
+    const command = parseWagerTransactionInput(data, idempotencyKey);
+    // A mensagem é a causa do pedido; sem correlation id próprio, ela também o identifica.
+    return { messageId, command: { ...command, correlationId: messageId, causationId: messageId } };
+}
+
 /** Lê campos acumulando erros, em vez de parar no primeiro. */
 class Reader {
     private readonly issues: string[] = [];

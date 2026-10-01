@@ -10,6 +10,7 @@ import type { Wallet } from "../../domain/wallet/wallet";
 import { LedgerDirection, type WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
 import { IdempotencyConflictError, WalletNotFoundError } from "../errors";
 import { eventsForOutcome } from "../messaging/events";
+import { InboxMessage } from "../messaging/inbox-message";
 import type { EventContext } from "../messaging/integration-event";
 import { OutboxMessage } from "../messaging/outbox-message";
 import { payloadHash } from "../payload-hash";
@@ -41,6 +42,16 @@ export interface ProcessWagerTransactionResult {
     balance: Money | undefined;
     failureCode: FailureCode | undefined;
     idempotentReplay: boolean;
+    /** A mesma mensagem da fila já tinha sido processada (o inbox barrou). */
+    duplicateMessage: boolean;
+}
+
+/** Quando o pedido vem da fila: registra a mensagem no inbox na mesma transação. */
+export interface InboxOptions {
+    consumerName: string;
+    messageId: string;
+    payloadHash: string;
+    receivedAt: Date;
 }
 
 export class ProcessWagerTransaction {
@@ -50,7 +61,7 @@ export class ProcessWagerTransaction {
         private readonly now: () => Date = () => new Date(),
     ) { }
 
-    async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
+    async execute(command: ProcessWagerTransactionCommand, inbox?: InboxOptions): Promise<ProcessWagerTransactionResult> {
         // Validação do payload ANTES de abrir transação: erro de formato nem toca no banco.
         const hash = hashOf(command);
         const kind = parseKind(command.kind);
@@ -75,8 +86,36 @@ export class ProcessWagerTransaction {
                 referenceExternalTransactionId: command.referenceExternalTransactionId,
                 createdAt: this.now(),
             });
-            return this.uow.run((ctx) => this.process(ctx, incoming, trace));
+            return this.uow.run(async (ctx) => {
+                if (inbox && !(await this.registerInbox(ctx, inbox))) {
+                    return this.duplicateMessage(ctx, incoming, inbox);
+                }
+                return this.process(ctx, incoming, trace);
+            });
         });
+    }
+
+    /**
+     * Anota a mensagem no inbox. Como é a mesma transação do efeito financeiro, a
+     * anotação só fica se o efeito ficar: "anotada" significa "processada".
+     */
+    private registerInbox(ctx: TransactionalContext, inbox: InboxOptions): Promise<boolean> {
+        const message = InboxMessage.receive(inbox);
+        message.markProcessed(inbox.receivedAt);
+        return ctx.inbox.tryInsert(message);
+    }
+
+    /** Mensagem repetida: devolve o resultado da primeira vez, sem processar de novo. */
+    private async duplicateMessage(
+        ctx: TransactionalContext,
+        tx: WagerTransaction,
+        inbox: InboxOptions,
+    ): Promise<ProcessWagerTransactionResult> {
+        const original = await ctx.transactions.findByIdempotencyKey(tx.idempotencyKey);
+        if (!original || !original.matchesPayload(tx.payloadHash)) {
+            throw new IdempotencyConflictError(`Message ${inbox.messageId} was already processed with a different payload`);
+        }
+        return { ...toResult(original, true), duplicateMessage: true };
     }
 
     private async process(
@@ -252,5 +291,6 @@ function toResult(tx: WagerTransaction, idempotentReplay: boolean): ProcessWager
         balance: tx.observedBalance,
         failureCode: tx.failureCode,
         idempotentReplay,
+        duplicateMessage: false,
     };
 }

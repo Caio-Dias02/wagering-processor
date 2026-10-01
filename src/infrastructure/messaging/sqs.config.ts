@@ -5,6 +5,7 @@ export const sqsConfig = {
     endpoint: process.env.SQS_ENDPOINT ?? "http://localhost:4566",
     region: process.env.AWS_REGION ?? "us-east-1",
     inputQueueName: process.env.SQS_INPUT_QUEUE ?? "wager-transactions.fifo",
+    deadLetterQueueName: process.env.SQS_DLQ ?? "wager-transactions-dlq.fifo",
     eventsQueueName: process.env.SQS_EVENTS_QUEUE ?? "wagering-events.fifo",
 };
 

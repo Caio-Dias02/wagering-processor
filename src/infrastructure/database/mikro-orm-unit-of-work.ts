@@ -1,6 +1,7 @@
 import { type EntityManager, type MikroORM, UniqueConstraintViolationException } from "@mikro-orm/postgresql";
 import { ConcurrencyConflictError, TransientInfrastructureError } from "../../application/errors";
 import type { TransactionalContext, UnitOfWork } from "../../application/ports/repositories";
+import { MikroOrmInboxRepository } from "./repositories/mikro-orm-inbox.repository";
 import { MikroOrmLedgerRepository } from "./repositories/mikro-orm-ledger.repository";
 import { MikroOrmOutboxRepository } from "./repositories/mikro-orm-outbox.repository";
 import { MikroOrmWagerTransactionRepository } from "./repositories/mikro-orm-wager-transaction.repository";
@@ -35,5 +36,6 @@ function createContext(em: EntityManager): TransactionalContext {
         transactions: new MikroOrmWagerTransactionRepository(em),
         ledger: new MikroOrmLedgerRepository(em),
         outbox: new MikroOrmOutboxRepository(em),
+        inbox: new MikroOrmInboxRepository(em),
     };
 }

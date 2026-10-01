@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { DeleteMessageCommand, GetQueueUrlCommand, ReceiveMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
+import { DeleteMessageCommand, GetQueueUrlCommand, PurgeQueueCommand, ReceiveMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { MikroORM } from "@mikro-orm/postgresql";
 import { WagerTransactionProcessed } from "../../src/application/messaging/events";
 import { OutboxMessage } from "../../src/application/messaging/outbox-message";
@@ -224,6 +224,8 @@ describe("outbox → SQS de verdade", () => {
     beforeAll(async () => {
         sqs = createSqsClient();
         queueUrl = (await sqs.send(new GetQueueUrlCommand({ QueueName: sqsConfig.eventsQueueName }))).QueueUrl!;
+        // Sobras de execuções anteriores (ou do app rodando) enterrariam o nosso evento.
+        await sqs.send(new PurgeQueueCommand({ QueueUrl: queueUrl }));
     });
 
     afterAll(() => sqs.destroy());

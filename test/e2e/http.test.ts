@@ -8,7 +8,9 @@ let app: INestApplication;
 let baseUrl: string;
 
 beforeAll(async () => {
-    process.env.OUTBOX_WORKER_ENABLED = "false"; // o outbox tem testes próprios; aqui só HTTP
+    // outbox e consumer têm testes próprios; aqui só HTTP
+    process.env.OUTBOX_WORKER_ENABLED = "false";
+    process.env.SQS_CONSUMER_ENABLED = "false";
     app = await createApp();
     app.useLogger(false); // os 500 de propósito não poluem a saída dos testes
     await app.get(MikroORM).migrator.up();

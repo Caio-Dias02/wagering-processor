@@ -1,3 +1,4 @@
+import type { InboxMessage } from "../messaging/inbox-message";
 import type { OutboxMessage } from "../messaging/outbox-message";
 import type { Wallet } from "../../domain/wallet/wallet";
 import type { WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
@@ -46,12 +47,21 @@ export interface OutboxRepository {
     save(message: OutboxMessage): Promise<void>;
 }
 
+export interface InboxRepository {
+    /**
+     * Registra a mensagem. Devolve false se ela já estava registrada (entrega repetida).
+     * Se outra transação estiver registrando a mesma mensagem agora, espera ela terminar.
+     */
+    tryInsert(message: InboxMessage): Promise<boolean>;
+}
+
 /** Tudo que o caso de uso pode usar DENTRO de uma transação. */
 export interface TransactionalContext {
     wallets: WalletRepository;
     transactions: WagerTransactionRepository;
     ledger: LedgerRepository;
     outbox: OutboxRepository;
+    inbox: InboxRepository;
 }
 
 export interface UnitOfWork {
