@@ -1,4 +1,51 @@
+# `docker compose up -d`                    → só Postgres + LocalStack (dev local e testes)
+# `docker compose --profile app up -d`      → tudo, com a aplicação em container
+# `... --profile app up -d --scale app=3`   → 3 instâncias (portas 3000, 3001, 3002)
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
+  SQS_ENDPOINT: http://localstack:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+
 services:
+  # Roda as migrations uma vez e termina. As instâncias do app só sobem depois dele,
+  # então várias réplicas nunca aplicam migrations ao mesmo tempo.
+  migrate:
+    profiles: [app]
+    build: .
+    image: wagering-processor:local
+    command: ["bun", "scripts/migrate.ts", "up"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    profiles: [app]
+    build: .
+    image: wagering-processor:local
+    environment: *app-env
+    ports:
+      - "3000-3002:3000"
+    init: true # PID 1 repassa o SIGTERM e recolhe processos
+    stop_grace_period: 30s # tempo para terminar a mensagem em andamento no shutdown
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     container_name: wagering-postgres

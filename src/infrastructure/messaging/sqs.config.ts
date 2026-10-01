@@ -16,6 +16,10 @@ export function createSqsClient(): SQSClient {
     return new SQSClient({
         endpoint: sqsConfig.endpoint,
         region: sqsConfig.region,
+        // Sempre fala com o endpoint configurado. Sem isso o SDK usa o host da QueueUrl, e o
+        // LocalStack devolve "localhost.localstack.cloud", que dentro de um container aponta
+        // para o próprio container.
+        useQueueUrlAsEndpoint: false,
         // LocalStack aceita qualquer credencial; em produção viriam do ambiente/IAM role.
         credentials: {
             accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "test",

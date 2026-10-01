@@ -12,6 +12,8 @@ export async function createApp(): Promise<INestApplication> {
     const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
     app.useLogger(app.get<JsonLogger>(LOGGER));
     app.useBodyParser("json", { limit: "16kb" }); // payloads são pequenos; corpo gigante é abuso
-    app.enableShutdownHooks();
+    // SIGTERM/SIGINT: para os workers, termina o que está em andamento, fecha banco e SQS,
+    // e sai com código 0 (sem useProcessExit o Nest reenvia o sinal e o processo sai com 143).
+    app.enableShutdownHooks(undefined, { useProcessExit: true });
     return app;
 }

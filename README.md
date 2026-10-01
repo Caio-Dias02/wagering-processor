@@ -23,14 +23,25 @@ Solução do [desafio técnico da Jungle Gaming](https://github.com/junglegaming
 
 ## Como rodar
 
+### Tudo em containers
+
+```bash
+docker compose --profile app up -d --build                 # 1 instância em http://localhost:3000
+docker compose --profile app up -d --build --scale app=3   # 3 instâncias: portas 3000, 3001, 3002
+```
+
+O serviço `migrate` aplica as migrations uma vez e termina; as instâncias do `app` só sobem depois dele (várias réplicas nunca migram ao mesmo tempo). Cada instância serve a API **e** roda o consumer SQS, o publisher da outbox e o worker de referências pendentes. `docker compose --profile app stop app` desliga de forma graciosa: termina o que está em andamento e sai com código 0.
+
+### Desenvolvimento local
+
 ```bash
 bun install
-docker compose up -d        # Postgres 17 + LocalStack (as filas SQS são criadas automaticamente)
+docker compose up -d        # só Postgres 17 + LocalStack (as filas SQS são criadas automaticamente)
 bun run db:migrate          # aplica as migrations
 bun run dev                 # API em http://localhost:3000 (com watch)
 ```
 
-Cada instância serve a API **e** roda o consumer SQS, o publisher da outbox e o worker de referências pendentes. Para simular várias instâncias, suba mais processos em portas diferentes:
+Sem `--profile app`, o compose sobe só as dependências: é o modo usado pelo desenvolvimento e pelos testes (um app em container consumiria a mesma fila que os testes). Para mais instâncias locais, suba processos em outras portas:
 
 ```bash
 PORT=3001 bun start         # bash
@@ -39,7 +50,7 @@ $env:PORT=3001; bun start   # PowerShell
 
 ## Testes
 
-Com o `docker compose up -d` rodando:
+Com o `docker compose up -d` rodando (**sem** `--profile app`: um app em container competiria com os testes pela mesma fila):
 
 ```bash
 bun test              # tudo (~35 s): unidade, integração, e2e HTTP e 3 instâncias
@@ -149,4 +160,5 @@ src/
 test/
   unit/  integration/  e2e/  multi-instance/
 docker/localstack/   criação das filas
+Dockerfile           imagem da aplicação (oven/bun, só dependências de produção)
 ```

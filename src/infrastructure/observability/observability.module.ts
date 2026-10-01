@@ -1,8 +1,19 @@
-import { Controller, Get, Global, Header, Inject, Injectable, Module, type OnModuleInit } from "@nestjs/common";
+import {
+    type BeforeApplicationShutdown,
+    Controller,
+    Get,
+    Global,
+    Header,
+    Inject,
+    Injectable,
+    Module,
+    type OnApplicationShutdown,
+    type OnModuleInit,
+} from "@nestjs/common";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import { MikroORM } from "@mikro-orm/postgresql";
 import { Registry } from "prom-client";
-import type { Observability } from "../../application/ports/observability";
+import type { LoggerPort, Observability } from "../../application/ports/observability";
 import { JsonLogger } from "./json-logger";
 import { registerOperationalGauges } from "./operational-gauges";
 import { PrometheusMetrics } from "./prometheus-metrics";
@@ -37,6 +48,20 @@ class OperationalGauges implements OnModuleInit {
     }
 }
 
+/** Deixa o desligamento visível no log: começou (com o sinal) e terminou. */
+@Injectable()
+class ShutdownLog implements BeforeApplicationShutdown, OnApplicationShutdown {
+    constructor(@Inject(LOGGER) private readonly logger: LoggerPort) { }
+
+    beforeApplicationShutdown(signal?: string): void {
+        this.logger.info("shutting down: stopping workers and finishing in-flight work", { signal });
+    }
+
+    onApplicationShutdown(signal?: string): void {
+        this.logger.info("shutdown complete", { signal });
+    }
+}
+
 @Global()
 @Module({
     controllers: [MetricsController],
@@ -52,6 +77,7 @@ class OperationalGauges implements OnModuleInit {
             useFactory: (logger: JsonLogger, metrics: PrometheusMetrics): Observability => ({ logger, metrics }),
         },
         OperationalGauges,
+        ShutdownLog,
     ],
     exports: [LOGGER, METRICS, OBSERVABILITY],
 })
