@@ -42,10 +42,11 @@ Este documento explica **como** o serviço garante as invariantes do desafio e *
                      OutboxWorker ──► SQS wagering-events.fifo
 
   PendingReferenceWorker ── FOR UPDATE SKIP LOCKED ──► resolve PENDING_REFERENCE
+  ReconciliationWorker ──── lease em scheduled_jobs ──► varre e reconcilia as wallets
   (* inbox só quando a entrada é a fila)
 ```
 
-Todos os processos são iguais: cada instância serve a API **e** roda o consumer, o publisher da outbox e o worker de pendentes. Não há líder nem coordenação em memória — toda a coordenação é feita pelo Postgres (locks de linha, constraints e `SKIP LOCKED`). Por isso a solução é correta com N instâncias, o que é verificado em teste com 3 processos reais (ver [§16](#16-testes)).
+Todos os processos são iguais: cada instância serve a API **e** roda o consumer, o publisher da outbox, o worker de pendentes e o agendador da reconciliação. Não há líder nem coordenação em memória — toda a coordenação é feita pelo Postgres (locks de linha, constraints, `SKIP LOCKED` e a lease dos jobs agendados). Por isso a solução é correta com N instâncias, o que é verificado em teste com 3 processos reais (ver [§16](#16-testes)).
 
 ## 2. Camadas
 
@@ -223,6 +224,7 @@ Restrição 9: unicidade, imutabilidade e não-negatividade são aplicadas **no 
 | `wallet_ledger_entries` | **append-only por trigger** (sem `UPDATE`, `DELETE`, `TRUNCATE`); `CHECK` da aritmética `balance_before ± amount = balance_after`; `amount > 0`; saldos `>= 0`; `UNIQUE(transaction_id, wallet_id)` (no máximo um lançamento por wallet por transação); **FK composta `(wallet_id, currency)` → `wallets(id, currency)`** (o lançamento não pode estar em outra moeda); `seq` bigserial para cursor estável |
 | `inbox_messages` | `PRIMARY KEY (consumer_name, message_id)` |
 | `outbox_messages` | `UNIQUE(seq)`, `CHECK attempts >= 0`, índice parcial de pendentes `(next_attempt_at, seq) WHERE published_at IS NULL` |
+| `scheduled_jobs` | `PRIMARY KEY (name)`: uma linha (lease) por job agendado |
 
 **Migrations** versionadas e reversíveis: a cadeia `up` → `down` de todas → `up` foi conferida num banco limpo (não há teste automatizado disso, porque o `down` apaga as tabelas do banco compartilhado pelos testes). Estratégia híbrida: uma migration **gerada** pelo MikroORM a partir das entidades (tabelas, checks, uniques, índices parciais) e migrations **manuais** com o que o ORM não gera (triggers, funções e a FK composta). A migration gerada não é editada à mão.
 
@@ -296,6 +298,17 @@ Labels não carregam ids (cardinalidade baixa). Os gauges de fila, outbox e pend
 
 **Reconciliação** (`POST /wallets/:id/reconciliation`): compara o saldo guardado com a soma do ledger, lidos numa **única instrução SQL** (um único snapshot — uma aposta commitada no meio não gera divergência falsa). Divergência **nunca é corrigida**: é logada, contada em métrica e sinalizada com `consistent: false`.
 
+**Reconciliação agendada** (`ReconciliationWorker` → `ReconcileAllWallets`): varre todas as wallets, paginando por id, e reconcilia cada uma na própria transação curta, sem segurar lock nem conexão enquanto as apostas seguem. Toda instância roda o agendador, mas **só uma varre por ciclo**. Antes de começar, a instância reivindica o ciclo numa única instrução atômica:
+
+```sql
+insert into scheduled_jobs (name, last_started_at) values ('wallet-reconciliation', now())
+on conflict (name) do update set last_started_at = excluded.last_started_at
+ where scheduled_jobs.last_started_at <= now() - interval
+returning name
+```
+
+Se a linha voltou, esta instância ganhou o ciclo. Se não voltou, outra já começou há menos de um intervalo. Duas instâncias ao mesmo tempo: a segunda espera a primeira e, ao reavaliar o `WHERE` com a linha nova, não atualiza nada. O relógio é o **do banco**, então diferenças de relógio entre instâncias não importam. Cada instância pergunta a cada `RECONCILIATION_POLL_INTERVAL_MS` (1 min); a varredura acontece a cada `RECONCILIATION_INTERVAL_MS` (1 h). No SIGTERM a varredura para entre uma wallet e outra. Divergências saem no log (`reconciliation sweep found divergent wallets`) e em `wallet_reconciliations_total{result="divergent"}`, que é a métrica para alertar.
+
 ## 14. Autenticação
 
 Não implementada (não vale pontos e não deve competir com correção financeira). O ponto de extensão está no código: `AuthGuard` aplicado aos controllers de negócio, delegando a uma `ProviderIdentityPort` cuja implementação atual (`NoAuthProviderIdentity`) não autentica ninguém. Health e métricas ficam fora do guard.
@@ -335,8 +348,38 @@ Desenho pretendido:
 | Reinício com consistência final | `multi-instance.test.ts`: instância morta à força sob carga, outra sobe, todas as wallets reconciliam e a outbox esvazia |
 | Crash depois do commit e antes de publicar | `outbox.test.ts` |
 | Shutdown gracioso do consumer | `sqs-consumer.test.ts` |
+| Reconciliação agendada, uma instância por ciclo | `reconcile-all-wallets.test.ts` (5 "instâncias" disputando o mesmo ciclo → só 1 varre) |
+| Carga com conferência de saldo | `scripts/load-test.ts` (`bun run test:load`, abaixo) |
 
 Os testes compartilham o mesmo banco; cada um cria suas próprias wallets com ids únicos.
+
+### Teste de carga
+
+`bun run test:load` gera tráfego contra uma aplicação rodando (uma ou várias instâncias, em round-robin) e **confere o dinheiro no fim**. O saldo de cada wallet tem que ser o saldo inicial mais o efeito de cada resposta `PROCESSED`, somado em centavos `bigint` do lado do cliente. Também confere a reconciliação, que nenhuma `BET` foi revertida duas vezes e que duplicatas devolveram a mesma transação. Mistura do tráfego: rodadas normais, desfecho antes da aposta (~15% das rodadas, viram `PENDING_REFERENCE`), `REFUND` e `ROLLBACK` concorrentes da mesma `BET` (~5%), 10% de reenvios duplicados em paralelo e metade das rodadas concentrada em 10% das wallets. O cliente se comporta como um provedor correto: reenvia com a mesma key em `503` ou erro de rede.
+
+Resultados medidos em Windows 11 + Docker Desktop (VM com 8 vCPU), Bun 1.4.2, Postgres 17 no compose. **Todas as execuções terminaram consistentes**: nenhum centavo de diferença, nenhuma reversão dupla, todo replay idêntico ao original.
+
+| Cenário | Throughput | p50 | p99 |
+|---|---|---|---|
+| 1 instância, 1 requisição por vez | 58 req/s | 16 ms | 39 ms |
+| 1 instância, concorrência 5 | 124 req/s | 38 ms | 154 ms |
+| 1 instância, concorrência 50 (padrão) | 95–150 req/s | 350–550 ms | 0,5–1 s |
+| 3 instâncias em container, concorrência 150, 6000 transações | 185 req/s | 853 ms | 1,5 s |
+
+**Onde está o gargalo** (investigado, não suposto):
+- **Não é o lock por wallet.** Com 500 wallets em vez de 20 o throughput é o mesmo. Nas amostras do `pg_stat_activity` durante a carga, de 0 a 3 das ~10 conexões ativas esperavam por `Lock:transactionid`.
+- **Não é o pool de conexões.** `DATABASE_POOL_MAX` 10 e 30 dão o mesmo resultado (148 contra 150 req/s).
+- **Não é o Postgres.** A maioria das conexões ativas está em `Client:ClientRead`, ou seja, com a transação aberta esperando a aplicação mandar a próxima instrução.
+- **É CPU da aplicação**, cerca de 10 ms por transação. Cada container fica em ~100–130% de CPU, o limite de uma thread de JavaScript. O perfil de CPU (`bun --cpu-prof-md`) não tem um ponto quente isolado: o custo se divide entre a montagem de queries do MikroORM (a maior fatia), o driver `pg`, o HTTP do Nest e a escrita dos logs.
+- Acima de ~50 requisições em voo por instância, a latência cresce só por fila (lei de Little: 50 em voo ÷ ~100 req/s ≈ 500 ms).
+- Com 3 instâncias o ganho não foi linear (~1,9×). A diferença provavelmente vem do próprio gerador de carga (um processo no Windows) e do repasse de portas do Docker Desktop. Não isolei isso.
+
+Alavancas, em ordem de custo/benefício:
+1. **Mais instâncias.** A aplicação não guarda estado, e o lock é por wallet, então wallets diferentes escalam em paralelo.
+2. **SQL escrito à mão no caminho quente**, que hoje faz ~10 idas ao banco por transação: travar a wallet e buscar a idempotency key numa instrução só, e gravar transação, ledger e outbox num único round-trip.
+3. **Logs** do caminho feliz em `debug`.
+
+O que **não** se negocia por throughput: `synchronous_commit`, o lock por wallet e a gravação atômica com a outbox.
 
 ## 17. Limitações e trade-offs
 
@@ -345,9 +388,9 @@ Os testes compartilham o mesmo banco; cada um cria suas próprias wallets com id
 - **Ordem dos eventos não é estrita entre tentativas.** Dentro de um lote a ordem segue o `seq`, mas se a publicação de um evento falhar e a de um posterior não, o posterior sai antes. Consumidores devem usar `walletVersion` (em `WalletBalanceChanged`) e o `eventId` para ordenar e deduplicar.
 - **Eventos emitidos pelo worker de pendentes** usam o id da transação como `correlationId`: o `correlationId` original da requisição não é persistido.
 - **Long polling abandonado**: quando uma instância desliga, um receive em andamento pode ser concluído pelo SQS e a mensagem fica invisível até o fim do visibility timeout (30 s por padrão). Não há perda, só atraso.
-- **Reconciliação sob demanda**, por wallet. Não há job agendado varrendo todas as wallets.
+- **Varredura de reconciliação interrompida não é retomada.** Se a instância cair (ou desligar) no meio, aquele ciclo fica incompleto, e a próxima varredura, um intervalo depois, recomeça do zero. Como ela só lê, repetir é seguro. Com milhões de wallets, valeria guardar um cursor na lease e conferir em lote (uma instrução por página em vez de uma por wallet).
 - **Métricas de contador são por instância**; a agregação entre instâncias é papel do Prometheus. Os gauges operacionais leem a fonte compartilhada.
-- **Sem teste de carga** (diferencial opcional).
+- **Throughput modesto por instância** (~100–150 req/s nesta máquina), limitado por CPU da aplicação, não por lock nem pelo banco ([§16](#teste-de-carga)). A escolha foi clareza e correção primeiro; as otimizações estão listadas e medidas, não aplicadas às cegas.
 - **Autenticação não implementada** ([§14](#14-autenticação)).
 - **LocalStack** emula o SQS; o comportamento da AWS real pode variar em detalhes (ex.: limites de purge, latência do redrive).
 - **Saldo máximo** limitado a `numeric(19,2)`; contratos limitam valores a 17 dígitos inteiros.

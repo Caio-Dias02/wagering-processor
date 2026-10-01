@@ -14,7 +14,8 @@ Solução do [desafio técnico da Jungle Gaming](https://github.com/junglegaming
 - **Ledger auditável e imutável**: append-only por trigger; o banco confere a aritmética de cada lançamento.
 - **Inbox + transactional outbox**: efeito financeiro, inbox e eventos na mesma transação; publicação at-least-once com `FOR UPDATE SKIP LOCKED`.
 - **Referências fora de ordem**: `PENDING_REFERENCE` + worker com backoff exponencial.
-- **Observabilidade**: logs JSON com correlation id, métricas Prometheus, readiness, reconciliação.
+- **Observabilidade**: logs JSON com correlation id, métricas Prometheus, readiness, reconciliação sob demanda e agendada (uma instância por ciclo, via lease no banco).
+- **Teste de carga que confere o dinheiro**: `bun run test:load` mede throughput e latência **e** prova que, depois de milhares de transações concorrentes, duplicadas e fora de ordem, cada saldo bate centavo por centavo com as respostas.
 
 ## Requisitos
 
@@ -30,7 +31,7 @@ docker compose --profile app up -d --build                 # 1 instância em htt
 docker compose --profile app up -d --build --scale app=3   # 3 instâncias: portas 3000, 3001, 3002
 ```
 
-O serviço `migrate` aplica as migrations uma vez e termina; as instâncias do `app` só sobem depois dele (várias réplicas nunca migram ao mesmo tempo). Cada instância serve a API **e** roda o consumer SQS, o publisher da outbox e o worker de referências pendentes. `docker compose --profile app stop app` desliga de forma graciosa: termina o que está em andamento e sai com código 0.
+O serviço `migrate` aplica as migrations uma vez e termina; as instâncias do `app` só sobem depois dele (várias réplicas nunca migram ao mesmo tempo). Cada instância serve a API **e** roda o consumer SQS, o publisher da outbox, o worker de referências pendentes e o agendador da reconciliação. `docker compose --profile app stop app` desliga de forma graciosa: termina o que está em andamento e sai com código 0.
 
 ### Desenvolvimento local
 
@@ -50,15 +51,39 @@ $env:PORT=3001; bun start   # PowerShell
 
 ## Testes
 
-Com o `docker compose up -d` rodando (**sem** `--profile app`: um app em container competiria com os testes pela mesma fila):
+Com o `docker compose up -d` rodando (**sem** `--profile app`) e **nenhuma** instância da aplicação no ar (nem `bun run dev`): os workers dela competiriam com os testes pela mesma fila e pelas mesmas linhas da outbox.
 
 ```bash
-bun test              # tudo (~35 s): unidade, integração, e2e HTTP e 3 instâncias
+bun test              # tudo (~45 s): unidade, integração, e2e HTTP e 3 instâncias
 bun test test/unit    # só unidade (não precisa de Docker)
 bun run typecheck
 ```
 
 Os testes usam Postgres e LocalStack **reais** — nenhum mock de banco ou fila. Todo teste confere a invariante `saldo da wallet == saldo reconstruído pelo ledger`. O teste de múltiplas instâncias sobe processos `bun src/main.ts` nas portas 3101–3104. O mapa "exigência do desafio → teste" está no [ARCHITECTURE.md §16](ARCHITECTURE.md#16-testes).
+
+### Teste de carga
+
+Bate numa aplicação **já rodando** e, além de medir, confere a correção no fim:
+
+```bash
+bun run dev                                    # ou: docker compose --profile app up -d --build
+bun run test:load                              # 20 wallets, 2000 transações, 50 em paralelo
+
+# 3 instâncias em container, mais carga
+docker compose --profile app up -d --build --scale app=3
+LOAD_TARGETS=http://localhost:3000,http://localhost:3001,http://localhost:3002 \
+  LOAD_CONCURRENCY=150 LOAD_TRANSACTIONS=6000 bun run test:load
+```
+
+O tráfego mistura rodadas normais (`BET` → `WIN`/`LOSS`/`REFUND`/`ROLLBACK`), desfechos que chegam **antes** da aposta, `REFUND` e `ROLLBACK` da mesma `BET` ao mesmo tempo, 10% de reenvios duplicados em paralelo e wallets "quentes" (10% das wallets recebem metade das rodadas). No fim, o script confere:
+
+- o saldo de cada wallet == saldo inicial + efeito de cada transação que a API respondeu como `PROCESSED` (em centavos `bigint`);
+- a reconciliação (`saldo == ledger`) de cada wallet;
+- nenhuma `BET` revertida duas vezes;
+- cada par de duplicatas devolveu a mesma transação, com uma resposta marcada como replay;
+- nenhuma transação ficou presa em `PENDING_REFERENCE`.
+
+Sai com código 1 se qualquer conferência falhar. Configuração: `LOAD_TARGETS`, `LOAD_WALLETS`, `LOAD_TRANSACTIONS`, `LOAD_CONCURRENCY`, `LOAD_DUPLICATE_RATIO`, `LOAD_INITIAL_BALANCE`, `LOAD_PENDING_TIMEOUT_MS` e `LOAD_SEED` (mesma semente → mesmo tráfego). Resultados e análise do gargalo no [ARCHITECTURE.md §16](ARCHITECTURE.md#16-testes).
 
 ## Comandos
 
@@ -67,6 +92,7 @@ Os testes usam Postgres e LocalStack **reais** — nenhum mock de banco ou fila.
 | `bun run dev` | API com watch |
 | `bun start` | API sem watch |
 | `bun test` | todos os testes |
+| `bun run test:load` | teste de carga contra uma aplicação rodando |
 | `bun run typecheck` | `tsc --noEmit` |
 | `bun run db:migrate` | aplica migrations pendentes |
 | `bun run db:rollback` | desfaz a última migration |
@@ -130,6 +156,7 @@ Todas as variáveis têm padrão para o ambiente local do `docker compose`.
 |---|---|---|
 | `PORT` | `3000` | porta HTTP |
 | `DATABASE_URL` | `postgresql://wagering:wagering@localhost:5432/wagering` | Postgres |
+| `DATABASE_POOL_MAX` | `10` | conexões por instância (teto de transações simultâneas) |
 | `SQS_ENDPOINT` | `http://localhost:4566` | endpoint SQS (LocalStack) |
 | `AWS_REGION` | `us-east-1` | região |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `test` / `test` | credenciais (LocalStack aceita qualquer uma) |
@@ -142,6 +169,9 @@ Todas as variáveis têm padrão para o ambiente local do `docker compose`.
 | `OUTBOX_POLL_INTERVAL_MS` | `500` | espera da outbox quando não há pendentes |
 | `PENDING_REFERENCE_WORKER_ENABLED` | `true` | liga o worker de referências pendentes |
 | `PENDING_REFERENCE_POLL_INTERVAL_MS` | `1000` | espera do worker quando não há pendentes |
+| `RECONCILIATION_WORKER_ENABLED` | `true` | liga a reconciliação agendada |
+| `RECONCILIATION_INTERVAL_MS` | `3600000` (1 h) | intervalo entre varreduras, somando todas as instâncias |
+| `RECONCILIATION_POLL_INTERVAL_MS` | `60000` | de quanto em quanto tempo cada instância pergunta se é a vez dela |
 | `LOG_LEVEL` | `info` | `debug` · `info` · `warn` · `error` · `silent` |
 
 ## Estrutura
@@ -153,12 +183,13 @@ src/
   infrastructure/
     database/        entidades (EntitySchema), mappers, repositórios, unit of work, migrations
     messaging/       cliente SQS, publisher de eventos, consumer
-    workers/         loops da outbox, do consumer e das referências pendentes
+    workers/         loops da outbox, do consumer, das referências pendentes e da reconciliação
     observability/   logger JSON, métricas Prometheus
   http/              controllers, presenters, filtro de erros, auth guard
   health/            liveness e readiness
 test/
   unit/  integration/  e2e/  multi-instance/
+scripts/             migrate.ts (migrations) · load-test.ts (teste de carga)
 docker/localstack/   criação das filas
 Dockerfile           imagem da aplicação (oven/bun, só dependências de produção)
 ```
