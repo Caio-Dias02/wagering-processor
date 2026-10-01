@@ -1,5 +1,5 @@
-import type { EntityManager } from "@mikro-orm/postgresql";
-import type { WagerTransactionRepository } from "../../../application/ports/repositories";
+import { type EntityManager, LockMode, QueryOrder } from "@mikro-orm/postgresql";
+import type { PendingReferenceClaim, WagerTransactionRepository } from "../../../application/ports/repositories";
 import {
     type WagerTransaction,
     type WagerTransactionKind,
@@ -54,6 +54,33 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
             status: WagerTransactionStatus.Processed,
         });
         return count > 0;
+    }
+
+    async claimDuePendingReference(now: Date): Promise<PendingReferenceClaim | null> {
+        // FOR UPDATE SKIP LOCKED: vários workers dividem as pendentes sem esperar um pelo outro.
+        // next_reference_attempt_at nulo = nunca tentada = vencida. Usa o índice parcial.
+        const record = await this.em.findOne(
+            WagerTransactionRecord,
+            {
+                status: WagerTransactionStatus.PendingReference,
+                $or: [{ nextReferenceAttemptAt: null }, { nextReferenceAttemptAt: { $lte: now } }],
+            },
+            {
+                orderBy: { nextReferenceAttemptAt: QueryOrder.ASC_NULLS_FIRST, createdAt: QueryOrder.ASC },
+                lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE,
+            },
+        );
+        return record
+            ? { transaction: WagerTransactionMapper.toDomain(record), attempts: record.referenceAttempts }
+            : null;
+    }
+
+    async scheduleReferenceRetry(transactionId: string, attempts: number, nextAttemptAt: Date): Promise<void> {
+        await this.em.nativeUpdate(
+            WagerTransactionRecord,
+            { id: transactionId },
+            { referenceAttempts: attempts, nextReferenceAttemptAt: nextAttemptAt },
+        );
     }
 
     private async findOneBy(

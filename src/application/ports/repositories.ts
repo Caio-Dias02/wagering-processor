@@ -24,6 +24,19 @@ export interface WagerTransactionRepository {
     insert(tx: WagerTransaction): Promise<void>;
     update(tx: WagerTransaction): Promise<void>;
     hasProcessedReversal(referenceTransactionId: string, kind: WagerTransactionKind): Promise<boolean>;
+    /**
+     * Próxima transação PENDING_REFERENCE vencida, TRAVADA até o fim da transação.
+     * Linhas já travadas por outro worker são puladas (SKIP LOCKED).
+     */
+    claimDuePendingReference(now: Date): Promise<PendingReferenceClaim | null>;
+    /** Agenda a próxima tentativa de resolver a referência. */
+    scheduleReferenceRetry(transactionId: string, attempts: number, nextAttemptAt: Date): Promise<void>;
+}
+
+export interface PendingReferenceClaim {
+    transaction: WagerTransaction;
+    /** Tentativas de resolução já feitas (0 na primeira). */
+    attempts: number;
 }
 
 export interface LedgerPage {
