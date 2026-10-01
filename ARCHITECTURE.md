@@ -285,7 +285,7 @@ Transações cuja referência ainda não chegou (ou chegou mas também está pen
 | `wager_transaction_processing_seconds` | latência de processamento |
 | `concurrency_conflicts_total{operation}` | corridas perdidas que causaram retry |
 | `sqs_messages_total{outcome,code}` | ack / retry / dead_letter por código |
-| `sqs_dead_letter_queue_messages` | profundidade da DLQ |
+| `sqs_dead_letter_queue_messages`, `sqs_input_queue_messages` | profundidade da DLQ e da fila de entrada |
 | `outbox_lag_seconds`, `outbox_pending_messages` | idade do evento pendente mais antigo e fila da outbox |
 | `outbox_publish_total{result}` | publicações e falhas |
 | `pending_reference_transactions`, `pending_reference_resolutions_total{outcome}` | referências pendentes |

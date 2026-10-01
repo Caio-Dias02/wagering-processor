@@ -54,7 +54,7 @@ $env:PORT=3001; bun start   # PowerShell
 Com o `docker compose up -d` rodando (**sem** `--profile app`) e **nenhuma** instância da aplicação no ar (nem `bun run dev`): os workers dela competiriam com os testes pela mesma fila e pelas mesmas linhas da outbox.
 
 ```bash
-bun test              # tudo (~45 s): unidade, integração, e2e HTTP e 3 instâncias
+bun test              # tudo (~55 s): unidade, integração, e2e HTTP e 3 instâncias
 bun test test/unit    # só unidade (não precisa de Docker)
 bun run typecheck
 ```
