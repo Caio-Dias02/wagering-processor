@@ -147,7 +147,7 @@ describe("worker de PENDING_REFERENCE", () => {
         const pending = await processTx.execute(command(wallet, { kind: "REFUND", referenceExternalTransactionId: "x" }));
         let now = new Date("2030-01-01T00:00:00.000Z");
         const resolver = new ResolvePendingReference(
-            uow, { maxAttempts: 8, baseDelayMs: 5_000, maxDelayMs: 60_000 }, undefined, () => now,
+            uow, { maxAttempts: 8, baseDelayMs: 5_000, maxDelayMs: 60_000 }, undefined, undefined, () => now,
         );
 
         expect(await resolver.execute()).toBe("rescheduled"); // tentativa 1 → próxima em 5s

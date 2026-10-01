@@ -1,4 +1,6 @@
 import { FailureCode } from "../../domain/wager-transaction/failure-code";
+import type { WagerTransaction } from "../../domain/wager-transaction/wager-transaction";
+import { Metric, type Observability, noopObservability } from "../ports/observability";
 import type { UnitOfWork } from "../ports/repositories";
 import { decideWagerTransaction, recordOutcome } from "../wager-decision";
 
@@ -29,15 +31,33 @@ export class ResolvePendingReference {
     constructor(
         private readonly uow: UnitOfWork,
         private readonly policy: PendingReferencePolicy = pendingReferencePolicy,
+        private readonly observability: Observability = noopObservability,
         private readonly newId: () => string = () => Bun.randomUUIDv7(),
         private readonly now: () => Date = () => new Date(),
     ) { }
 
-    execute(): Promise<ResolveOutcome> {
+    async execute(): Promise<ResolveOutcome> {
+        const { outcome, tx } = await this.resolveOne();
+        if (outcome !== "none" && tx) {
+            this.observability.metrics.increment(Metric.PendingReferenceResolutions, { outcome });
+            this.observability.logger.info(`pending reference ${outcome}`, {
+                transactionId: tx.id,
+                walletId: tx.walletId,
+                providerId: tx.providerId,
+                externalTransactionId: tx.externalTransactionId,
+                referenceExternalTransactionId: tx.referenceExternalTransactionId,
+                status: tx.status,
+                failureCode: tx.failureCode,
+            });
+        }
+        return outcome;
+    }
+
+    private resolveOne(): Promise<{ outcome: ResolveOutcome; tx?: WagerTransaction }> {
         return this.uow.run(async (ctx) => {
             const at = this.now();
             const claim = await ctx.transactions.claimDuePendingReference(at);
-            if (!claim) return "none";
+            if (!claim) return { outcome: "none" };
 
             const { transaction: tx, attempts } = claim;
             const wallet = await ctx.wallets.findByIdForUpdate(tx.walletId);
@@ -50,7 +70,7 @@ export class ResolvePendingReference {
             if (decision.kind === "decided") {
                 await ctx.transactions.update(tx);
                 await recordOutcome(ctx, tx, wallet, expectedVersion, decision.entry, events);
-                return "resolved";
+                return { outcome: "resolved", tx };
             }
 
             const attempt = attempts + 1;
@@ -59,12 +79,12 @@ export class ResolvePendingReference {
                 tx.reject(FailureCode.ReferenceNotFound, wallet.balance, at);
                 await ctx.transactions.update(tx);
                 await recordOutcome(ctx, tx, wallet, expectedVersion, undefined, events);
-                return "expired";
+                return { outcome: "expired", tx };
             }
 
             const delay = Math.min(this.policy.baseDelayMs * 2 ** (attempt - 1), this.policy.maxDelayMs);
             await ctx.transactions.scheduleReferenceRetry(tx.id, attempt, new Date(at.getTime() + delay));
-            return "rescheduled";
+            return { outcome: "rescheduled", tx };
         });
     }
 }

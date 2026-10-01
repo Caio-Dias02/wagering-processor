@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { SQSClient } from "@aws-sdk/client-sqs";
+import type { Observability } from "../../application/ports/observability";
 import type { UnitOfWork } from "../../application/ports/repositories";
 import { ProcessWagerTransaction } from "../../application/use-cases/process-wager-transaction";
 import { PublishOutbox } from "../../application/use-cases/publish-outbox";
@@ -8,6 +9,7 @@ import { UNIT_OF_WORK } from "../database/database.module";
 import { SqsEventPublisher } from "../messaging/sqs-event-publisher";
 import { defaultRetryDelaySeconds, SqsWagerTransactionConsumer } from "../messaging/sqs-wager-consumer";
 import { sqsConfig } from "../messaging/sqs.config";
+import { OBSERVABILITY } from "../observability/observability.module";
 import { OutboxWorker } from "./outbox.worker";
 import { PendingReferenceWorker } from "./pending-reference.worker";
 import { SqsConsumerWorker } from "./sqs-consumer.worker";
@@ -16,27 +18,33 @@ import { SqsConsumerWorker } from "./sqs-consumer.worker";
     providers: [
         {
             provide: PublishOutbox,
-            inject: [UNIT_OF_WORK, SQSClient],
-            useFactory: (uow: UnitOfWork, sqs: SQSClient) =>
-                new PublishOutbox(uow, new SqsEventPublisher(sqs, sqsConfig.eventsQueueName)),
+            inject: [UNIT_OF_WORK, SQSClient, OBSERVABILITY],
+            useFactory: (uow: UnitOfWork, sqs: SQSClient, observability: Observability) =>
+                new PublishOutbox(uow, new SqsEventPublisher(sqs, sqsConfig.eventsQueueName), observability),
         },
         {
             provide: SqsWagerTransactionConsumer,
-            inject: [UNIT_OF_WORK, SQSClient],
+            inject: [UNIT_OF_WORK, SQSClient, OBSERVABILITY],
             // Mesmo caso de uso da API, montado aqui com a mesma unit of work.
-            useFactory: (uow: UnitOfWork, sqs: SQSClient) =>
-                new SqsWagerTransactionConsumer(sqs, new ProcessWagerTransaction(uow), {
-                    queueName: sqsConfig.inputQueueName,
-                    deadLetterQueueName: sqsConfig.deadLetterQueueName,
-                    consumerName: "wager-transactions-consumer",
-                    waitTimeSeconds: 10,
-                    retryDelaySeconds: defaultRetryDelaySeconds,
-                }),
+            useFactory: (uow: UnitOfWork, sqs: SQSClient, observability: Observability) =>
+                new SqsWagerTransactionConsumer(
+                    sqs,
+                    new ProcessWagerTransaction(uow, observability),
+                    {
+                        queueName: sqsConfig.inputQueueName,
+                        deadLetterQueueName: sqsConfig.deadLetterQueueName,
+                        consumerName: "wager-transactions-consumer",
+                        waitTimeSeconds: 10,
+                        retryDelaySeconds: defaultRetryDelaySeconds,
+                    },
+                    observability,
+                ),
         },
         {
             provide: ResolvePendingReference,
-            inject: [UNIT_OF_WORK],
-            useFactory: (uow: UnitOfWork) => new ResolvePendingReference(uow),
+            inject: [UNIT_OF_WORK, OBSERVABILITY],
+            useFactory: (uow: UnitOfWork, observability: Observability) =>
+                new ResolvePendingReference(uow, undefined, observability),
         },
         OutboxWorker,
         PendingReferenceWorker,

@@ -1,10 +1,11 @@
-import { Body, Controller, Get, HttpCode, Inject, NotFoundException, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpCode, Inject, NotFoundException, Param, Post, Query, UseGuards } from "@nestjs/common";
 import { InvalidInputError, isUuid, parseCreateWalletInput } from "../application/input-validation";
 import { WageringQueries } from "../application/queries";
 import { CreateWallet } from "../application/use-cases/create-wallet";
 import { ReconcileWallet } from "../application/use-cases/reconcile-wallet";
 import { AuthGuard } from "./auth.guard";
 import { ledgerCursor, presentLedgerEntry, presentWallet } from "./presenters";
+import { CORRELATION_HEADER } from "./request-context.middleware";
 
 const DEFAULT_LEDGER_LIMIT = 50;
 const MAX_LEDGER_LIMIT = 200;
@@ -20,8 +21,8 @@ export class WalletsController {
 
     @Post()
     @HttpCode(201)
-    async create(@Body() body: unknown) {
-        const wallet = await this.createWallet.execute(parseCreateWalletInput(body));
+    async create(@Body() body: unknown, @Headers(CORRELATION_HEADER) correlationId: string) {
+        const wallet = await this.createWallet.execute({ ...parseCreateWalletInput(body), correlationId });
         return presentWallet(wallet);
     }
 

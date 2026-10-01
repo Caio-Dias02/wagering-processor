@@ -1,4 +1,5 @@
 import type { EventPublisherPort } from "../ports/event-publisher";
+import { Metric, type Observability, noopObservability } from "../ports/observability";
 import type { UnitOfWork } from "../ports/repositories";
 
 export interface PublishOutboxResult {
@@ -26,20 +27,25 @@ export class PublishOutbox {
     constructor(
         private readonly uow: UnitOfWork,
         private readonly publisher: EventPublisherPort,
+        private readonly observability: Observability = noopObservability,
         private readonly now: () => Date = () => new Date(),
         private readonly batchSize = OUTBOX_BATCH_SIZE,
     ) { }
 
-    execute(): Promise<PublishOutboxResult> {
-        return this.uow.run(async (ctx) => {
+    async execute(): Promise<PublishOutboxResult> {
+        const result = await this.uow.run(async (ctx) => {
             const due = await ctx.outbox.claimDue(this.now(), this.batchSize);
             if (due.length === 0) return { claimed: 0, published: 0, failed: 0 };
 
             let confirmed: Set<string>;
             try {
                 confirmed = await this.publisher.publish(due);
-            } catch {
+            } catch (error) {
                 confirmed = new Set(); // broker fora: o lote inteiro vai para retry
+                this.observability.logger.warn("outbox publish failed, batch scheduled for retry", {
+                    batchSize: due.length,
+                    error: error instanceof Error ? error.message : String(error),
+                });
             }
 
             const at = this.now();
@@ -50,5 +56,10 @@ export class PublishOutbox {
             }
             return { claimed: due.length, published: confirmed.size, failed: due.length - confirmed.size };
         });
+
+        const { metrics } = this.observability;
+        if (result.published > 0) metrics.increment(Metric.OutboxPublish, { result: "published" }, result.published);
+        if (result.failed > 0) metrics.increment(Metric.OutboxPublish, { result: "failed" }, result.failed);
+        return result;
     }
 }

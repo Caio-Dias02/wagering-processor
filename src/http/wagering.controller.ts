@@ -6,6 +6,7 @@ import { ProcessWagerTransaction } from "../application/use-cases/process-wager-
 import { WagerTransactionStatus } from "../domain/wager-transaction/wager-transaction";
 import { AuthGuard } from "./auth.guard";
 import { presentProcessResult, presentTransaction } from "./presenters";
+import { CORRELATION_HEADER } from "./request-context.middleware";
 
 /** Status HTTP de cada desfecho gravado. Replay devolve o mesmo status do original. */
 const STATUS_BY_RESULT: Record<WagerTransactionStatus, number> = {
@@ -27,10 +28,12 @@ export class WageringController {
     @Post("wagering/transactions")
     async submit(
         @Headers("idempotency-key") idempotencyKey: string | undefined,
+        @Headers(CORRELATION_HEADER) correlationId: string,
         @Body() body: unknown,
         @Res({ passthrough: true }) res: Response,
     ) {
-        const result = await this.processTransaction.execute(parseWagerTransactionInput(body, idempotencyKey));
+        const command = parseWagerTransactionInput(body, idempotencyKey);
+        const result = await this.processTransaction.execute({ ...command, correlationId, source: "http" });
         res.status(STATUS_BY_RESULT[result.status]);
         return presentProcessResult(result);
     }

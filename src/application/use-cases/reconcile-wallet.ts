@@ -1,5 +1,5 @@
 import type { Money } from "../../domain/money/money";
-import { type LoggerPort, type MetricsPort, noopLogger, noopMetrics } from "../ports/observability";
+import { Metric, type Observability, noopObservability } from "../ports/observability";
 import type { UnitOfWork } from "../ports/repositories";
 
 export interface ReconciliationResult {
@@ -20,8 +20,7 @@ export interface ReconciliationResult {
 export class ReconcileWallet {
     constructor(
         private readonly uow: UnitOfWork,
-        private readonly logger: LoggerPort = noopLogger,
-        private readonly metrics: MetricsPort = noopMetrics,
+        private readonly observability: Observability = noopObservability,
     ) { }
 
     async execute(walletId: string): Promise<ReconciliationResult | null> {
@@ -31,9 +30,9 @@ export class ReconcileWallet {
         const difference = snapshot.storedBalance.subtract(snapshot.calculatedBalance);
         const consistent = difference.isZero();
 
-        this.metrics.increment("wallet_reconciliations_total", { result: consistent ? "consistent" : "divergent" });
+        this.observability.metrics.increment(Metric.Reconciliations, { result: consistent ? "consistent" : "divergent" });
         if (!consistent) {
-            this.logger.error("wallet balance diverges from ledger", {
+            this.observability.logger.error("wallet balance diverges from ledger", {
                 walletId,
                 // diferença e contagem ajudam a investigar; saldos completos ficam fora do log
                 difference: difference.toString(),

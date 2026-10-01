@@ -12,6 +12,7 @@ beforeAll(async () => {
     process.env.OUTBOX_WORKER_ENABLED = "false";
     process.env.SQS_CONSUMER_ENABLED = "false";
     process.env.PENDING_REFERENCE_WORKER_ENABLED = "false";
+    process.env.LOG_LEVEL = "silent";
     app = await createApp();
     app.useLogger(false); // os 500 de propósito não poluem a saída dos testes
     await app.get(MikroORM).migrator.up();
@@ -268,6 +269,38 @@ describe("consultas", () => {
 
     test("health/live responde sem autenticação", async () => {
         expect((await call("GET", "/health/live")).status).toBe(200);
+    });
+
+    test("X-Correlation-Id: devolve o do cliente, ou gera um", async () => {
+        const echoed = await call("GET", "/health/live", undefined, { "X-Correlation-Id": "req-123" });
+        expect(echoed.headers.get("x-correlation-id")).toBe("req-123");
+
+        const generated = await call("GET", "/health/live");
+        expect(generated.headers.get("x-correlation-id")).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    test("GET /metrics expõe as métricas pedidas, com rota em template (sem ids)", async () => {
+        const wallet = await newWallet();
+        await submit(transaction(wallet));
+
+        const response = await fetch(`${baseUrl}/metrics`);
+        const text = await response.text();
+        expect(response.status).toBe(200);
+        for (const name of [
+            "wager_transactions_total",
+            "wager_transaction_processing_seconds",
+            "inbox_duplicate_messages_total",
+            "concurrency_conflicts_total",
+            "sqs_messages_total",
+            "outbox_lag_seconds",
+            "outbox_pending_messages",
+            "sqs_dead_letter_queue_messages",
+            "pending_reference_transactions",
+        ]) {
+            expect(text).toContain(`# TYPE ${name}`);
+        }
+        expect(text).toContain('route="/wallets/:walletId"');
+        expect(text).not.toContain(wallet.id);
     });
 
     test("health/ready confere Postgres e SQS", async () => {

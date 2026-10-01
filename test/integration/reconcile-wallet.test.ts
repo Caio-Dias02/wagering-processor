@@ -55,7 +55,7 @@ describe("ReconcileWallet", () => {
         await bet(wallet, "25.00");
         const recorder = new Recorder();
 
-        const result = await new ReconcileWallet(uow, recorder, recorder).execute(wallet.id);
+        const result = await new ReconcileWallet(uow, { logger: recorder, metrics: recorder }).execute(wallet.id);
 
         expect(JSON.parse(JSON.stringify(result))).toEqual({
             walletId: wallet.id,
@@ -75,7 +75,7 @@ describe("ReconcileWallet", () => {
         await orm.em.getConnection().execute("update wallets set balance = balance + 1.50 where id = ?", [wallet.id]);
         const recorder = new Recorder();
 
-        const result = await new ReconcileWallet(uow, recorder, recorder).execute(wallet.id);
+        const result = await new ReconcileWallet(uow, { logger: recorder, metrics: recorder }).execute(wallet.id);
 
         expect(result?.consistent).toBe(false);
         expect(result?.difference.toString()).toBe("1.50");

@@ -7,7 +7,6 @@ import {
     SendMessageCommand,
     type SQSClient,
 } from "@aws-sdk/client-sqs";
-import { Logger } from "@nestjs/common";
 import {
     ConcurrencyConflictError,
     IdempotencyConflictError,
@@ -16,6 +15,7 @@ import {
 } from "../../application/errors";
 import { InvalidInputError, parseWagerTransactionMessage } from "../../application/input-validation";
 import { payloadHash } from "../../application/payload-hash";
+import { Metric, type Observability, noopObservability } from "../../application/ports/observability";
 import type { ProcessWagerTransaction } from "../../application/use-cases/process-wager-transaction";
 import { DomainError } from "../../domain/shared/domain-error";
 
@@ -51,7 +51,6 @@ type Outcome =
  * então a ordem por wallet é preservada.
  */
 export class SqsWagerTransactionConsumer {
-    private readonly logger = new Logger(SqsWagerTransactionConsumer.name);
     private queueUrl: string | undefined;
     private deadLetterUrl: string | undefined;
     private stopping = false;
@@ -61,6 +60,7 @@ export class SqsWagerTransactionConsumer {
         private readonly sqs: SQSClient,
         private readonly processTransaction: ProcessWagerTransaction,
         private readonly options: SqsWagerConsumerOptions,
+        private readonly observability: Observability = noopObservability,
         private readonly now: () => Date = () => new Date(),
     ) { }
 
@@ -105,15 +105,16 @@ export class SqsWagerTransactionConsumer {
     private async handle(message: Message): Promise<void> {
         const outcome = await this.process(message);
         const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? 1);
-        const context = { messageId: message.MessageId, receiveCount };
+        const context = { sqsMessageId: message.MessageId, receiveCount };
 
         switch (outcome.kind) {
             case "ack":
                 await this.delete(message);
-                if (outcome.duplicate) this.logger.log({ msg: "duplicate message acked", ...context });
+                this.observability.metrics.increment(Metric.SqsMessages, { outcome: "ack", code: outcome.duplicate ? "DUPLICATE" : "OK" });
                 break;
             case "retry":
-                this.logger.warn({ msg: "transient failure, will retry", reason: outcome.reason, ...context });
+                this.observability.metrics.increment(Metric.SqsMessages, { outcome: "retry", code: "TRANSIENT" });
+                this.observability.logger.warn("transient failure, message will be retried", { reason: outcome.reason, ...context });
                 await this.sqs.send(new ChangeMessageVisibilityCommand({
                     QueueUrl: await this.resolveQueueUrl(),
                     ReceiptHandle: message.ReceiptHandle,
@@ -121,7 +122,8 @@ export class SqsWagerTransactionConsumer {
                 }));
                 break;
             case "dead-letter":
-                this.logger.error({ msg: "permanent failure, sent to DLQ", code: outcome.code, reason: outcome.reason, ...context });
+                this.observability.metrics.increment(Metric.SqsMessages, { outcome: "dead_letter", code: outcome.code });
+                this.observability.logger.error("permanent failure, message sent to DLQ", { code: outcome.code, reason: outcome.reason, ...context });
                 await this.sendToDeadLetter(message, outcome);
                 await this.delete(message);
                 break;
@@ -132,7 +134,7 @@ export class SqsWagerTransactionConsumer {
         try {
             const body: unknown = JSON.parse(message.Body ?? "");
             const { messageId, command } = parseWagerTransactionMessage(body);
-            const result = await this.processTransaction.execute(command, {
+            const result = await this.processTransaction.execute({ ...command, source: "sqs" }, {
                 consumerName: this.options.consumerName,
                 messageId,
                 payloadHash: payloadHash(body),

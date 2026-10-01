@@ -10,6 +10,7 @@ import { IdempotencyConflictError, WalletNotFoundError } from "../errors";
 import { InboxMessage } from "../messaging/inbox-message";
 import type { EventContext } from "../messaging/integration-event";
 import { payloadHash } from "../payload-hash";
+import { Metric, type Observability, noopObservability } from "../ports/observability";
 import type { TransactionalContext, UnitOfWork } from "../ports/repositories";
 import { retryOnConflict } from "../retry";
 import { decideWagerTransaction, recordOutcome } from "../wager-decision";
@@ -30,6 +31,8 @@ export interface ProcessWagerTransactionCommand {
     correlationId?: string;
     /** Rastreamento: o que causou este pedido (ex.: messageId da fila). Não entra no hash. */
     causationId?: string;
+    /** Por onde chegou (label de métrica). Não entra no hash. */
+    source?: "http" | "sqs";
 }
 
 export interface ProcessWagerTransactionResult {
@@ -54,16 +57,30 @@ export interface InboxOptions {
 export class ProcessWagerTransaction {
     constructor(
         private readonly uow: UnitOfWork,
+        private readonly observability: Observability = noopObservability,
         private readonly newId: () => string = () => Bun.randomUUIDv7(),
         private readonly now: () => Date = () => new Date(),
     ) { }
 
     async execute(command: ProcessWagerTransactionCommand, inbox?: InboxOptions): Promise<ProcessWagerTransactionResult> {
+        const startedAt = performance.now();
+        const trace = { correlationId: command.correlationId ?? this.newId(), causationId: command.causationId };
+        const result = await this.run(command, trace, inbox);
+        this.report(command, trace.correlationId, result, (performance.now() - startedAt) / 1000);
+        return result;
+    }
+
+    private async run(
+        command: ProcessWagerTransactionCommand,
+        trace: Pick<EventContext, "correlationId" | "causationId">,
+        inbox: InboxOptions | undefined,
+    ): Promise<ProcessWagerTransactionResult> {
         // Validação do payload ANTES de abrir transação: erro de formato nem toca no banco.
         const hash = hashOf(command);
         const kind = parseKind(command.kind);
         const money = Money.from(command.money);
-        const trace = { correlationId: command.correlationId ?? this.newId(), causationId: command.causationId };
+        const onConflict = () =>
+            this.observability.metrics.increment(Metric.ConcurrencyConflicts, { operation: "process_wager_transaction" });
 
         // Se outra transação ganhar a corrida, repetimos numa NOVA transação. Na próxima
         // volta quem ganhou já está gravado, e caímos em replay ou conflito.
@@ -89,6 +106,37 @@ export class ProcessWagerTransaction {
                 }
                 return this.process(ctx, incoming, trace);
             });
+        }, onConflict);
+    }
+
+    /** Uma linha de log por pedido + métricas. Só ids e códigos: nada de valores ou saldos. */
+    private report(
+        command: ProcessWagerTransactionCommand,
+        correlationId: string,
+        result: ProcessWagerTransactionResult,
+        seconds: number,
+    ): void {
+        const source = command.source ?? "http";
+        const { metrics, logger } = this.observability;
+        metrics.increment(Metric.WagerTransactions, {
+            source, kind: command.kind, status: result.status, replay: String(result.idempotentReplay),
+        });
+        metrics.observe(Metric.WagerProcessingSeconds, seconds, { source, status: result.status });
+        if (result.duplicateMessage) metrics.increment(Metric.DuplicateMessages);
+
+        logger.info(result.idempotentReplay ? "wager transaction replayed" : "wager transaction decided", {
+            correlationId,
+            messageId: command.causationId,
+            transactionId: result.transactionId,
+            walletId: command.walletId,
+            providerId: command.providerId,
+            externalTransactionId: command.externalTransactionId,
+            kind: command.kind,
+            status: result.status,
+            failureCode: result.failureCode,
+            idempotentReplay: result.idempotentReplay,
+            duplicateMessage: result.duplicateMessage,
+            durationMs: Math.round(seconds * 1000),
         });
     }
 
