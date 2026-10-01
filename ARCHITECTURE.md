@@ -110,9 +110,9 @@ O desafio permite assumir só BRL; o modelo continua multi-moeda (uma wallet por
 2. Com a wallet travada, o fluxo lê, decide e grava. A gravação do saldo é `UPDATE ... WHERE id = ? AND version = ?`; se nenhuma linha for afetada, lança `ConcurrencyConflictError`. Com o lock isso não deveria acontecer — é defesa em profundidade contra um caminho que esqueça de travar.
 3. `CHECK (balance >= 0)` no banco: mesmo um bug de aplicação não consegue gravar saldo negativo.
 
-**Por que pessimista e não otimista?** Wallet de apostas é *hot*: muitas operações pequenas na mesma linha em rajada. Com lock otimista, sob contenção, a maioria das tentativas falha e é repetida (trabalho desperdiçado e latência de cauda alta). Com `FOR UPDATE` as operações viram uma fila curta por wallet, a decisão é tomada sobre o saldo real, e o cenário 100/80/80 é resolvido naturalmente: a segunda aposta enxerga 20.00 e é rejeitada. O custo é o tempo de lock, minimizado mantendo a transação curta (sem I/O externo dentro dela).
+**Por que pessimista e não otimista?** Wallet de apostas é *hot*: muitas operações pequenas na mesma linha em rajada. Com lock otimista, sob contenção, a maioria das tentativas falha e é repetida (trabalho desperdiçado e latência de cauda alta). Com `FOR UPDATE` as operações viram uma fila curta por wallet, a decisão é tomada sobre o saldo real, e o cenário 100/80/80 é resolvido naturalmente: a segunda aposta enxerga 20.00 e é rejeitada. O custo é o tempo de lock, minimizado mantendo a transação financeira curta (sem I/O externo dentro dela). A exceção é a transação do `OutboxWorker`, que não trava wallet nenhuma, mas chama o SQS com as linhas da outbox travadas (trade-off no [§17](#17-limitações-e-trade-offs)).
 
-**Ordem dos locks (evita deadlock).** Todo caminho trava no máximo uma wallet. O worker de pendentes trava a linha da transação pendente e depois a wallet; o fluxo normal trava a wallet e só **lê** outras transações (leitura não espera lock no Postgres). Não há ciclo de espera.
+**Ordem dos locks (evita deadlock).** Todo caminho trava no máximo uma wallet. O worker de pendentes trava a linha da transação pendente e depois a wallet; o fluxo normal trava a wallet e só **lê** outras transações (leitura não espera lock no Postgres). Isso vale também para o reenvio de uma transação que ainda está `PENDING_REFERENCE`: o replay só lê a linha e devolve `202`, sem tentar resolvê-la. Quem resolve é sempre o worker. Não há ciclo de espera: `pending-reference.test.ts` roda 50 replays de pendentes ao mesmo tempo que dois workers as resolvem, e o Postgres não detecta deadlock.
 
 **Corridas perdidas.** Quando duas transações tentam gravar a mesma chave única ao mesmo tempo (ex.: mesma idempotency key para wallets diferentes, que não compartilham lock), a perdedora recebe violação de unique. O unit of work traduz isso para `ConcurrencyConflictError` e o caso de uso **repete do zero numa transação nova** (até 3 vezes) — depois de um erro o Postgres aborta a transação inteira, então não dá para "continuar" a anterior. Na nova tentativa, quem ganhou já está gravado e o resultado vira replay ou conflito.
 
@@ -247,7 +247,7 @@ Restrição 9: unicidade, imutabilidade e não-negatividade são aplicadas **no 
 ### Transactional outbox
 
 - Transação, saldo, ledger, inbox e eventos são gravados **atomicamente**: ou tudo é confirmado, ou nada. Nenhum evento é publicado antes do commit.
-- O `OutboxWorker` pega lotes de até 10 com `FOR UPDATE SKIP LOCKED`, publica com `SendMessageBatch` e marca como publicado — tudo na transação que mantém as linhas travadas. Se o processo morrer no meio, a transação é desfeita, as linhas destravam e **outra instância publica**. Resultado: **at-least-once** — pode haver duplicata, nunca perda. O consumidor deduplica pelo `eventId`.
+- O `OutboxWorker` pega lotes de até 10 com `FOR UPDATE SKIP LOCKED`, publica com `SendMessageBatch` e marca como publicado — tudo na transação que mantém as linhas travadas. Se o processo morrer no meio, a transação é desfeita, as linhas destravam e **outra instância publica**. Resultado: **at-least-once** — pode haver duplicata, nunca perda. O consumidor deduplica pelo `eventId`. Cada chamada ao SQS tem **prazo de 5 s**: estourou, o lote volta para retry (ver o trade-off no [§17](#17-limitações-e-trade-offs)).
 - Na fila de eventos (`wagering-events.fifo`): `MessageGroupId = aggregateId` e `MessageDeduplicationId = eventId` (o SQS descarta reenvios em 5 min — otimização, não garantia).
 - Falha de publicação: `attempts + 1` e backoff exponencial (1 s dobrando, até 5 min). **Sem limite de tentativas**: um evento confirmado não pode ser descartado; a métrica `outbox_lag_seconds` mostra quando algo está preso.
 
@@ -270,7 +270,7 @@ Transações cuja referência ainda não chegou (ou chegou mas também está pen
 2. trava a wallet e **reaplica as mesmas regras** do fluxo normal (código compartilhado em `application/wager-decision.ts`) — o estado pode ter mudado enquanto ela esperava (ex.: a `BET` chegou e já foi revertida → `REFERENCE_ALREADY_REVERSED`);
 3. se a referência continua ausente, agenda a próxima tentativa.
 
-**Política**: até **8 tentativas** com backoff exponencial de 5 s (5, 10, 20, 40, 80, 160, 320 s; teto de 30 min) ≈ 21 minutos no total. Provedores enviam a operação dependente segundos — no máximo poucos minutos — depois da original; a janela dá folga grande para atraso real e devolve uma resposta definitiva no mesmo dia, em vez de deixar a transação pendurada. Esgotado o limite: `REJECTED` com `REFERENCE_NOT_FOUND` e evento `WagerTransactionRejected`.
+**Política**: até **8 tentativas**. A 1ª acontece assim que o worker vê a pendente; entre uma tentativa e a seguinte, o backoff exponencial começa em 5 s e dobra: 5, 10, 20, 40, 80, 160 e 320 s (7 esperas) = **635 s ≈ 10,6 minutos** da 1ª à 8ª tentativa. O teto de 30 min por espera é só uma proteção: com estes parâmetros, a maior espera é de 320 s e ele nunca é atingido. Provedores enviam a operação dependente segundos — no máximo poucos minutos — depois da original; a janela dá folga grande para atraso real e devolve uma resposta definitiva em cerca de 10 minutos, em vez de deixar a transação pendurada. Esgotado o limite: `REJECTED` com `REFERENCE_NOT_FOUND` e evento `WagerTransactionRejected`.
 
 ## 13. Observabilidade
 
@@ -345,6 +345,8 @@ Desenho pretendido:
 | ≥ 3 instâncias simultâneas | `test/multi-instance/multi-instance.test.ts` (3 processos reais) |
 | Worker morto depois do commit e antes do ack | `sqs-consumer.test.ts` |
 | `ROLLBACK`/`REFUND` antes da referência | `pending-reference.test.ts` |
+| Replay de pendente enquanto o worker resolve (sem deadlock) | `pending-reference.test.ts` |
+| SQS travado durante a publicação da outbox | `test/unit/sqs-event-publisher.test.ts` (prazo por chamada) |
 | Reinício com consistência final | `multi-instance.test.ts`: instância morta à força sob carga, outra sobe, todas as wallets reconciliam e a outbox esvazia |
 | Crash depois do commit e antes de publicar | `outbox.test.ts` |
 | Shutdown gracioso do consumer | `sqs-consumer.test.ts` |
@@ -357,14 +359,24 @@ Os testes compartilham o mesmo banco; cada um cria suas próprias wallets com id
 
 `bun run test:load` gera tráfego contra uma aplicação rodando (uma ou várias instâncias, em round-robin) e **confere o dinheiro no fim**. O saldo de cada wallet tem que ser o saldo inicial mais o efeito de cada resposta `PROCESSED`, somado em centavos `bigint` do lado do cliente. Também confere a reconciliação, que nenhuma `BET` foi revertida duas vezes e que duplicatas devolveram a mesma transação. Mistura do tráfego: rodadas normais, desfecho antes da aposta (~15% das rodadas, viram `PENDING_REFERENCE`), `REFUND` e `ROLLBACK` concorrentes da mesma `BET` (~5%), 10% de reenvios duplicados em paralelo e metade das rodadas concentrada em 10% das wallets. O cliente se comporta como um provedor correto: reenvia com a mesma key em `503` ou erro de rede.
 
-Resultados medidos em Windows 11 + Docker Desktop (VM com 8 vCPU), Bun 1.4.2, Postgres 17 no compose. **Todas as execuções terminaram consistentes**: nenhum centavo de diferença, nenhuma reversão dupla, todo replay idêntico ao original.
+**Metodologia.** A latência é medida no cliente, por requisição, incluindo cada reenvio. A taxa de erro conta tudo que não é desfecho do contrato (`200`/`202`/`422`): `503`, outros `5xx`, `4xx` inesperado e erro de rede. Os conflitos de concorrência são o delta de `concurrency_conflicts_total`, somado no `/metrics` de todas as instâncias. O outbox lag é amostrado a cada segundo em `outbox_lag_seconds` (idade do evento pendente mais antigo), e no fim o script espera a outbox esvaziar. `LOAD_SEED=42` repete exatamente o mesmo tráfego.
 
-| Cenário | Throughput | p50 | p99 |
+**Ambiente.** Windows 11 + Docker Desktop (VM com 8 vCPU), Bun 1.4.2, Postgres 17 e LocalStack 4.4 no compose. **Todas as execuções terminaram consistentes**: nenhum centavo de diferença, nenhuma reversão dupla, todo replay idêntico ao original.
+
+| Cenário (`LOAD_SEED=42`) | Throughput | p50 | p95 | p99 | Erros | Conflitos | Outbox lag máx | Outbox vazia após |
+|---|---|---|---|---|---|---|---|---|
+| 1 instância local, 20 wallets, concorrência 50, 2024 tx | 140 req/s | 375 ms | 575 ms | 775 ms | 0,00% | 0 | 14 s | 10 s |
+| 3 instâncias em container, 200 wallets, concorrência 150, 6065 tx | 171 req/s | 855 ms | 1,6 s | 2,0 s | 0,00% | 0 | 37 s | 32 s |
+
+Latência por nível de concorrência (1 instância local):
+
+| Concorrência | Throughput | p50 | p99 |
 |---|---|---|---|
-| 1 instância, 1 requisição por vez | 58 req/s | 16 ms | 39 ms |
-| 1 instância, concorrência 5 | 124 req/s | 38 ms | 154 ms |
-| 1 instância, concorrência 50 (padrão) | 95–150 req/s | 350–550 ms | 0,5–1 s |
-| 3 instâncias em container, concorrência 150, 6000 transações | 185 req/s | 853 ms | 1,5 s |
+| 1 | 58 req/s | 16 ms | 39 ms |
+| 5 | 124 req/s | 38 ms | 154 ms |
+| 50 | 95–150 req/s | 350–550 ms | 0,5–1 s |
+
+**Por que 0 conflitos.** As duplicatas e as reversões concorrentes da mesma `BET` são serializadas pelo lock da wallet *antes* de chegar às constraints unique. A segunda requisição encontra a primeira já gravada (replay, ou `REFERENCE_ALREADY_REVERSED`) e não perde corrida nenhuma. O backstop por unique/version existe e é testado na integração, mas sob esse tráfego não precisou agir.
 
 **Onde está o gargalo** (investigado, não suposto):
 - **Não é o lock por wallet.** Com 500 wallets em vez de 20 o throughput é o mesmo. Nas amostras do `pg_stat_activity` durante a carga, de 0 a 3 das ~10 conexões ativas esperavam por `Lock:transactionid`.
@@ -372,12 +384,14 @@ Resultados medidos em Windows 11 + Docker Desktop (VM com 8 vCPU), Bun 1.4.2, Po
 - **Não é o Postgres.** A maioria das conexões ativas está em `Client:ClientRead`, ou seja, com a transação aberta esperando a aplicação mandar a próxima instrução.
 - **É CPU da aplicação**, cerca de 10 ms por transação. Cada container fica em ~100–130% de CPU, o limite de uma thread de JavaScript. O perfil de CPU (`bun --cpu-prof-md`) não tem um ponto quente isolado: o custo se divide entre a montagem de queries do MikroORM (a maior fatia), o driver `pg`, o HTTP do Nest e a escrita dos logs.
 - Acima de ~50 requisições em voo por instância, a latência cresce só por fila (lei de Little: 50 em voo ÷ ~100 req/s ≈ 500 ms).
-- Com 3 instâncias o ganho não foi linear (~1,9×). A diferença provavelmente vem do próprio gerador de carga (um processo no Windows) e do repasse de portas do Docker Desktop. Não isolei isso.
+- Com 3 instâncias o ganho foi pequeno (~1,2–1,9× entre execuções). A diferença provavelmente vem do próprio gerador de carga (um processo no Windows), do repasse de portas do Docker Desktop e dos três containers dividindo a mesma VM com o Postgres. Não isolei isso.
+- **A outbox atrasa sob carga saturada.** Cada transação gera de 1 a 2 eventos, e o publisher (um por instância, lotes de 10 por `SendMessageBatch`, mais um `UPDATE` por mensagem) disputa CPU com as requisições. O lag cresce enquanto a carga dura (14 s com 1 instância, 37 s com 3) e zera de 10 a 32 s depois que ela para. **Nenhum evento se perde**, só atrasa. A métrica `outbox_lag_seconds` existe justamente para alertar sobre isso.
 
 Alavancas, em ordem de custo/benefício:
-1. **Mais instâncias.** A aplicação não guarda estado, e o lock é por wallet, então wallets diferentes escalam em paralelo.
+1. **Mais instâncias.** A aplicação não guarda estado, e o lock é por wallet, então wallets diferentes escalam em paralelo. Os publishers também escalam, porque `SKIP LOCKED` distribui os lotes entre eles.
 2. **SQL escrito à mão no caminho quente**, que hoje faz ~10 idas ao banco por transação: travar a wallet e buscar a idempotency key numa instrução só, e gravar transação, ledger e outbox num único round-trip.
-3. **Logs** do caminho feliz em `debug`.
+3. **Outbox:** marcar o lote como publicado com um único `UPDATE ... WHERE id = ANY(?)` e publicar vários lotes em paralelo por instância.
+4. **Logs** do caminho feliz em `debug`.
 
 O que **não** se negocia por throughput: `synchronous_commit`, o lock por wallet e a gravação atômica com a outbox.
 
@@ -386,11 +400,12 @@ O que **não** se negocia por throughput: `synchronous_commit`, o lock por walle
 - **`FAILED` e `INFRASTRUCTURE_FAILURE` não são produzidos.** Persistir `FAILED` por uma falha de infraestrutura transformaria uma queda temporária num resultado definitivo — e um replay passaria a devolver `FAILED` para sempre. Falhas transitórias respondem 503 (HTTP) ou voltam para a fila (SQS); as permanentes de mensagem vão para a DLQ com o motivo, onde ficam auditáveis. O status continua no schema e na máquina de estados para um uso futuro (ex.: operador encerrando manualmente uma transação presa).
 - **`REFUND` depois de `WIN` é aceito** ([§7](#7-regras-de-negócio-e-interpretações)). Uma regra "BET liquidada não pode ser reembolsada" seria mais segura, mas pode recusar fluxos legítimos de alguns provedores; ficou como decisão consciente.
 - **Ordem dos eventos não é estrita entre tentativas.** Dentro de um lote a ordem segue o `seq`, mas se a publicação de um evento falhar e a de um posterior não, o posterior sai antes. Consumidores devem usar `walletVersion` (em `WalletBalanceChanged`) e o `eventId` para ordenar e deduplicar.
+- **A outbox publica no SQS dentro da transação que trava as linhas.** É simples e correto: se o processo morrer no meio, o rollback solta as linhas e outra instância publica. O custo é que uma conexão do pool, o mesmo que atende as apostas, fica presa durante a chamada de rede. Como cada instância roda um publisher só, o efeito máximo é **uma** conexão de 10 por instância. O risco de esgotar o pool apareceria com vários publishers por instância ou um pool pequeno. O tempo preso é limitado por um prazo de 5 s por chamada (`SqsEventPublisher`, testado contra um SQS falso que nunca responde). Antes desse prazo, um SQS travado prenderia a conexão para sempre: o SDK da AWS não tem timeout por padrão. A alternativa, se isso pesar, é uma **lease**: numa transação curta, marcar o lote com `locked_until = now() + 30 s` e commitar; publicar **fora** de transação; numa segunda transação curta, marcar como publicado. Nenhuma conexão espera a rede, e uma lease vencida (processo morto) é retomada por outra instância. O preço é mais uma escrita por lote e um campo a mais na outbox.
 - **Eventos emitidos pelo worker de pendentes** usam o id da transação como `correlationId`: o `correlationId` original da requisição não é persistido.
 - **Long polling abandonado**: quando uma instância desliga, um receive em andamento pode ser concluído pelo SQS e a mensagem fica invisível até o fim do visibility timeout (30 s por padrão). Não há perda, só atraso.
 - **Varredura de reconciliação interrompida não é retomada.** Se a instância cair (ou desligar) no meio, aquele ciclo fica incompleto, e a próxima varredura, um intervalo depois, recomeça do zero. Como ela só lê, repetir é seguro. Com milhões de wallets, valeria guardar um cursor na lease e conferir em lote (uma instrução por página em vez de uma por wallet).
 - **Métricas de contador são por instância**; a agregação entre instâncias é papel do Prometheus. Os gauges operacionais leem a fonte compartilhada.
-- **Throughput modesto por instância** (~100–150 req/s nesta máquina), limitado por CPU da aplicação, não por lock nem pelo banco ([§16](#teste-de-carga)). A escolha foi clareza e correção primeiro; as otimizações estão listadas e medidas, não aplicadas às cegas.
+- **Throughput modesto por instância** (~100–150 req/s nesta máquina), limitado por CPU da aplicação, não por lock nem pelo banco ([§16](#teste-de-carga)). Sob carga saturada, a **outbox atrasa** dezenas de segundos (sem perda). A escolha foi clareza e correção primeiro; as otimizações estão listadas e medidas, não aplicadas às cegas.
 - **Autenticação não implementada** ([§14](#14-autenticação)).
 - **LocalStack** emula o SQS; o comportamento da AWS real pode variar em detalhes (ex.: limites de purge, latência do redrive).
 - **Saldo máximo** limitado a `numeric(19,2)`; contratos limitam valores a 17 dígitos inteiros.

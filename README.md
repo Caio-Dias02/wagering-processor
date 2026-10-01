@@ -81,9 +81,10 @@ O tráfego mistura rodadas normais (`BET` → `WIN`/`LOSS`/`REFUND`/`ROLLBACK`),
 - a reconciliação (`saldo == ledger`) de cada wallet;
 - nenhuma `BET` revertida duas vezes;
 - cada par de duplicatas devolveu a mesma transação, com uma resposta marcada como replay;
-- nenhuma transação ficou presa em `PENDING_REFERENCE`.
+- nenhuma transação ficou presa em `PENDING_REFERENCE`;
+- a outbox esvaziou (nenhum evento confirmado ficou para trás).
 
-Sai com código 1 se qualquer conferência falhar. Configuração: `LOAD_TARGETS`, `LOAD_WALLETS`, `LOAD_TRANSACTIONS`, `LOAD_CONCURRENCY`, `LOAD_DUPLICATE_RATIO`, `LOAD_INITIAL_BALANCE`, `LOAD_PENDING_TIMEOUT_MS` e `LOAD_SEED` (mesma semente → mesmo tráfego). Resultados e análise do gargalo no [ARCHITECTURE.md §16](ARCHITECTURE.md#16-testes).
+O relatório traz throughput, latência p50/p95/p99, taxa de erro, status HTTP, desfechos, conflitos de concorrência (`concurrency_conflicts_total`, somado em todas as instâncias) e outbox lag (máximo amostrado de `outbox_lag_seconds` e tempo até esvaziar). Sai com código 1 se qualquer conferência falhar. Configuração: `LOAD_TARGETS`, `LOAD_WALLETS`, `LOAD_TRANSACTIONS`, `LOAD_CONCURRENCY`, `LOAD_DUPLICATE_RATIO`, `LOAD_INITIAL_BALANCE`, `LOAD_PENDING_TIMEOUT_MS` e `LOAD_SEED` (mesma semente → mesmo tráfego). Resultados e análise do gargalo no [ARCHITECTURE.md §16](ARCHITECTURE.md#16-testes).
 
 ## Comandos
 

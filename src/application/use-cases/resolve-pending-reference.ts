@@ -8,9 +8,10 @@ import { decideWagerTransaction, recordOutcome } from "../wager-decision";
  * Política de novas tentativas para referências fora de ordem (§7.1).
  *
  * Provedores mandam a operação dependente segundos (no máximo poucos minutos) depois
- * da original. 8 tentativas com 5s, 10s, 20s ... (teto de 30 min) cobrem ~21 minutos:
- * folga grande para atraso real, e curto o bastante para o provedor receber
- * REFERENCE_NOT_FOUND no mesmo dia em vez de uma transação pendurada para sempre.
+ * da original. 8 tentativas: a 1ª na hora e, entre elas, 7 esperas de 5s, 10s, 20s ... 320s
+ * = 635s (~10,6 minutos). É folga grande para atraso real, e curto o bastante para o provedor
+ * receber REFERENCE_NOT_FOUND logo, em vez de uma transação pendurada para sempre.
+ * O teto de 30 min por espera só vale se alguém aumentar maxAttempts ou baseDelayMs.
  */
 export const pendingReferencePolicy = {
     maxAttempts: 8,
