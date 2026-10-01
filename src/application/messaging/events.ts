@@ -1,13 +1,39 @@
 import type { MoneyProps } from "../../domain/money/money";
 import type { FailureCode } from "../../domain/wager-transaction/failure-code";
-import type {
-    WagerTransaction,
-    WagerTransactionKind,
+import {
+    type WagerTransaction,
+    type WagerTransactionKind,
     WagerTransactionStatus,
 } from "../../domain/wager-transaction/wager-transaction";
 import type { Wallet } from "../../domain/wallet/wallet";
 import type { LedgerDirection, WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
 import { type EventContext, IntegrationEvent } from "./integration-event";
+
+/**
+ * Eventos que o desfecho de uma transação gera:
+ *  PROCESSED          → WagerTransactionProcessed (+ WalletBalanceChanged se o saldo mudou)
+ *  REJECTED           → WagerTransactionRejected
+ *  PENDING_REFERENCE  → WagerTransactionPendingReference
+ */
+export function eventsForOutcome(
+    tx: WagerTransaction,
+    wallet: Wallet | undefined,
+    entry: WalletLedgerEntry | undefined,
+    ctx: EventContext,
+): IntegrationEvent<unknown>[] {
+    switch (tx.status) {
+        case WagerTransactionStatus.Processed:
+            return entry && wallet
+                ? [WagerTransactionProcessed.from(tx, ctx), WalletBalanceChanged.from(wallet, entry, ctx)]
+                : [WagerTransactionProcessed.from(tx, ctx)];
+        case WagerTransactionStatus.Rejected:
+            return [WagerTransactionRejected.from(tx, ctx)];
+        case WagerTransactionStatus.PendingReference:
+            return [WagerTransactionPendingReference.from(tx, ctx)];
+        default:
+            return [];
+    }
+}
 
 /** Campos da transação que todo evento sobre ela carrega. */
 interface TransactionSnapshot {

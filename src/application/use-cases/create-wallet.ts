@@ -2,12 +2,15 @@ import { Money, type MoneyProps } from "../../domain/money/money";
 import { WagerTransaction } from "../../domain/wager-transaction/wager-transaction";
 import { Wallet } from "../../domain/wallet/wallet";
 import { WalletAlreadyExistsError } from "../errors";
+import { WalletBalanceChanged } from "../messaging/events";
+import { OutboxMessage } from "../messaging/outbox-message";
 import type { UnitOfWork } from "../ports/repositories";
 import { retryOnConflict } from "../retry";
 
 export interface CreateWalletCommand {
     playerId: string;
     initialBalance: MoneyProps;
+    correlationId?: string;
 }
 
 export class CreateWallet {
@@ -52,6 +55,13 @@ export class CreateWallet {
                         }),
                     );
                     await ctx.ledger.insert(openingEntry);
+
+                    const event = WalletBalanceChanged.from(wallet, openingEntry, {
+                        correlationId: command.correlationId ?? this.newId(),
+                        occurredAt: at,
+                        newId: this.newId,
+                    });
+                    await ctx.outbox.insert([OutboxMessage.enqueue(event)]);
                 }
 
                 return wallet;

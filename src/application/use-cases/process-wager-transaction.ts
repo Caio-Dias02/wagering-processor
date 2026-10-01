@@ -9,6 +9,9 @@ import { InvalidWagerTransactionError } from "../../domain/wager-transaction/wag
 import type { Wallet } from "../../domain/wallet/wallet";
 import { LedgerDirection, type WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
 import { IdempotencyConflictError, WalletNotFoundError } from "../errors";
+import { eventsForOutcome } from "../messaging/events";
+import type { EventContext } from "../messaging/integration-event";
+import { OutboxMessage } from "../messaging/outbox-message";
 import { payloadHash } from "../payload-hash";
 import type { TransactionalContext, UnitOfWork } from "../ports/repositories";
 import { retryOnConflict } from "../retry";
@@ -25,6 +28,10 @@ export interface ProcessWagerTransactionCommand {
     kind: string;
     money: MoneyProps;
     referenceExternalTransactionId?: string;
+    /** Rastreamento: id do pedido de ponta a ponta (gerado se não vier). Não entra no hash. */
+    correlationId?: string;
+    /** Rastreamento: o que causou este pedido (ex.: messageId da fila). Não entra no hash. */
+    causationId?: string;
 }
 
 export interface ProcessWagerTransactionResult {
@@ -48,6 +55,7 @@ export class ProcessWagerTransaction {
         const hash = hashOf(command);
         const kind = parseKind(command.kind);
         const money = Money.from(command.money);
+        const trace = { correlationId: command.correlationId ?? this.newId(), causationId: command.causationId };
 
         // Se outra transação ganhar a corrida, repetimos numa NOVA transação. Na próxima
         // volta quem ganhou já está gravado, e caímos em replay ou conflito.
@@ -67,11 +75,15 @@ export class ProcessWagerTransaction {
                 referenceExternalTransactionId: command.referenceExternalTransactionId,
                 createdAt: this.now(),
             });
-            return this.uow.run((ctx) => this.process(ctx, incoming));
+            return this.uow.run((ctx) => this.process(ctx, incoming, trace));
         });
     }
 
-    private async process(ctx: TransactionalContext, tx: WagerTransaction): Promise<ProcessWagerTransactionResult> {
+    private async process(
+        ctx: TransactionalContext,
+        tx: WagerTransaction,
+        trace: Pick<EventContext, "correlationId" | "causationId">,
+    ): Promise<ProcessWagerTransactionResult> {
         // 1. Trava a wallet: daqui até o commit, ninguém mais mexe nela.
         const wallet = await ctx.wallets.findByIdForUpdate(tx.walletId);
         if (!wallet) {
@@ -98,6 +110,11 @@ export class ProcessWagerTransaction {
             await ctx.wallets.save(wallet, expectedVersion);
             await ctx.ledger.insert(entry);
         }
+
+        // 5. Eventos vão para a outbox NESTA transação: só existem se o commit acontecer.
+        //    Replay não chega aqui, então não gera evento repetido.
+        const events = eventsForOutcome(tx, wallet, entry, { ...trace, occurredAt: tx.createdAt, newId: this.newId });
+        await ctx.outbox.insert(events.map((e) => OutboxMessage.enqueue(e)));
 
         return toResult(tx, false);
     }

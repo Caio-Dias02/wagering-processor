@@ -2,6 +2,7 @@ import { type EntityManager, type MikroORM, UniqueConstraintViolationException }
 import { ConcurrencyConflictError, TransientInfrastructureError } from "../../application/errors";
 import type { TransactionalContext, UnitOfWork } from "../../application/ports/repositories";
 import { MikroOrmLedgerRepository } from "./repositories/mikro-orm-ledger.repository";
+import { MikroOrmOutboxRepository } from "./repositories/mikro-orm-outbox.repository";
 import { MikroOrmWagerTransactionRepository } from "./repositories/mikro-orm-wager-transaction.repository";
 import { MikroOrmWalletRepository } from "./repositories/mikro-orm-wallet.repository";
 import { isTransientDatabaseError } from "./transient-errors";
@@ -33,5 +34,6 @@ function createContext(em: EntityManager): TransactionalContext {
         wallets: new MikroOrmWalletRepository(em),
         transactions: new MikroOrmWagerTransactionRepository(em),
         ledger: new MikroOrmLedgerRepository(em),
+        outbox: new MikroOrmOutboxRepository(em),
     };
 }

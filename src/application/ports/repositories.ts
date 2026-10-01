@@ -1,3 +1,4 @@
+import type { OutboxMessage } from "../messaging/outbox-message";
 import type { Wallet } from "../../domain/wallet/wallet";
 import type { WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
 import type {
@@ -34,11 +35,23 @@ export interface LedgerRepository {
     listByWallet(walletId: string, afterCursor: string | undefined, limit: number): Promise<LedgerPage>;
 }
 
+export interface OutboxRepository {
+    insert(messages: OutboxMessage[]): Promise<void>;
+    /**
+     * Pega até `limit` mensagens pendentes e vencidas, TRAVANDO as linhas até o fim da
+     * transação. Linhas já travadas por outro publisher são puladas (SKIP LOCKED).
+     */
+    claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
+    /** Grava attempts / nextAttemptAt / publishedAt da mensagem. */
+    save(message: OutboxMessage): Promise<void>;
+}
+
 /** Tudo que o caso de uso pode usar DENTRO de uma transação. */
 export interface TransactionalContext {
     wallets: WalletRepository;
     transactions: WagerTransactionRepository;
     ledger: LedgerRepository;
+    outbox: OutboxRepository;
 }
 
 export interface UnitOfWork {
