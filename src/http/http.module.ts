@@ -4,6 +4,7 @@ import type { UnitOfWork } from "../application/ports/repositories";
 import { WageringQueries } from "../application/queries";
 import { CreateWallet } from "../application/use-cases/create-wallet";
 import { ProcessWagerTransaction } from "../application/use-cases/process-wager-transaction";
+import { ReconcileWallet } from "../application/use-cases/reconcile-wallet";
 import { UNIT_OF_WORK } from "../infrastructure/database/database.module";
 import { AuthGuard, NoAuthProviderIdentity, PROVIDER_IDENTITY } from "./auth.guard";
 import { HttpErrorFilter } from "./http-error.filter";
@@ -23,6 +24,7 @@ const useCase = <T>(type: new (uow: UnitOfWork) => T) => ({
         useCase(CreateWallet),
         useCase(ProcessWagerTransaction),
         useCase(WageringQueries),
+        useCase(ReconcileWallet),
         { provide: PROVIDER_IDENTITY, useClass: NoAuthProviderIdentity },
         AuthGuard,
         { provide: APP_FILTER, useClass: HttpErrorFilter },

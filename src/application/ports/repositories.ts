@@ -1,5 +1,6 @@
 import type { InboxMessage } from "../messaging/inbox-message";
 import type { OutboxMessage } from "../messaging/outbox-message";
+import type { Money } from "../../domain/money/money";
 import type { Wallet } from "../../domain/wallet/wallet";
 import type { WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
 import type {
@@ -44,9 +45,20 @@ export interface LedgerPage {
     nextCursor: string | undefined;
 }
 
+export interface ReconciliationSnapshot {
+    storedBalance: Money;
+    calculatedBalance: Money;
+    checkedEntries: number;
+}
+
 export interface LedgerRepository {
     insert(entry: WalletLedgerEntry): Promise<void>;
     listByWallet(walletId: string, afterCursor: string | undefined, limit: number): Promise<LedgerPage>;
+    /**
+     * Saldo guardado na wallet e saldo recalculado pelo ledger, lidos no MESMO instante
+     * (uma única instrução SQL). null se a wallet não existe.
+     */
+    reconciliationSnapshot(walletId: string): Promise<ReconciliationSnapshot | null>;
 }
 
 export interface OutboxRepository {

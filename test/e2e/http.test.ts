@@ -249,6 +249,23 @@ describe("consultas", () => {
         expect((await call("GET", "/providers/p%00/wagering/transactions/x")).status).toBe(404);
     });
 
+    test("POST /wallets/:id/reconciliation no formato do contrato; 404 se não existe", async () => {
+        const wallet = await newWallet();
+        await submit(transaction(wallet, { money: { amount: "25.00", currency: "BRL" } }));
+
+        const { status, body } = await call("POST", `/wallets/${wallet.id}/reconciliation`);
+        expect(status).toBe(200);
+        expect(body).toEqual({
+            walletId: wallet.id,
+            storedBalance: { amount: "75.00", currency: "BRL" },
+            calculatedBalance: { amount: "75.00", currency: "BRL" },
+            difference: { amount: "0.00", currency: "BRL" },
+            consistent: true,
+            checkedEntries: 2,
+        });
+        expect((await call("POST", `/wallets/${Bun.randomUUIDv7()}/reconciliation`)).status).toBe(404);
+    });
+
     test("health/live responde sem autenticação", async () => {
         expect((await call("GET", "/health/live")).status).toBe(200);
     });

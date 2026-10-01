@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Inject, NotFoundException, Param, Post
 import { InvalidInputError, isUuid, parseCreateWalletInput } from "../application/input-validation";
 import { WageringQueries } from "../application/queries";
 import { CreateWallet } from "../application/use-cases/create-wallet";
+import { ReconcileWallet } from "../application/use-cases/reconcile-wallet";
 import { AuthGuard } from "./auth.guard";
 import { ledgerCursor, presentLedgerEntry, presentWallet } from "./presenters";
 
@@ -14,6 +15,7 @@ export class WalletsController {
     constructor(
         @Inject(CreateWallet) private readonly createWallet: CreateWallet,
         @Inject(WageringQueries) private readonly queries: WageringQueries,
+        @Inject(ReconcileWallet) private readonly reconcileWallet: ReconcileWallet,
     ) { }
 
     @Post()
@@ -29,6 +31,15 @@ export class WalletsController {
         const wallet = isUuid(walletId) ? await this.queries.getWallet(walletId) : null;
         if (!wallet) throw new NotFoundException(`Wallet ${walletId} not found`);
         return presentWallet(wallet);
+    }
+
+    /** Sempre 200 quando a wallet existe: divergência vem sinalizada em `consistent: false`. */
+    @Post(":walletId/reconciliation")
+    @HttpCode(200)
+    async reconcile(@Param("walletId") walletId: string) {
+        const result = isUuid(walletId) ? await this.reconcileWallet.execute(walletId) : null;
+        if (!result) throw new NotFoundException(`Wallet ${walletId} not found`);
+        return result; // Money vira { amount, currency } no JSON
     }
 
     @Get(":walletId/ledger")
