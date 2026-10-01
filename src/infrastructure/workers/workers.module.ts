@@ -4,6 +4,8 @@ import type { Observability } from "../../application/ports/observability";
 import type { UnitOfWork } from "../../application/ports/repositories";
 import { ProcessWagerTransaction } from "../../application/use-cases/process-wager-transaction";
 import { PublishOutbox } from "../../application/use-cases/publish-outbox";
+import { defaultReconcileAllWalletsOptions, ReconcileAllWallets } from "../../application/use-cases/reconcile-all-wallets";
+import { ReconcileWallet } from "../../application/use-cases/reconcile-wallet";
 import { ResolvePendingReference } from "../../application/use-cases/resolve-pending-reference";
 import { UNIT_OF_WORK } from "../database/database.module";
 import { SqsEventPublisher } from "../messaging/sqs-event-publisher";
@@ -12,6 +14,7 @@ import { sqsConfig } from "../messaging/sqs.config";
 import { OBSERVABILITY } from "../observability/observability.module";
 import { OutboxWorker } from "./outbox.worker";
 import { PendingReferenceWorker } from "./pending-reference.worker";
+import { ReconciliationWorker, reconciliationWorkerConfig } from "./reconciliation.worker";
 import { SqsConsumerWorker } from "./sqs-consumer.worker";
 
 @Module({
@@ -47,9 +50,19 @@ import { SqsConsumerWorker } from "./sqs-consumer.worker";
             useFactory: (uow: UnitOfWork, observability: Observability) =>
                 new ResolvePendingReference(uow, undefined, observability),
         },
+        {
+            provide: ReconcileAllWallets,
+            inject: [UNIT_OF_WORK, OBSERVABILITY],
+            useFactory: (uow: UnitOfWork, observability: Observability) =>
+                new ReconcileAllWallets(uow, new ReconcileWallet(uow, observability), observability, {
+                    ...defaultReconcileAllWalletsOptions,
+                    intervalMs: reconciliationWorkerConfig.intervalMs,
+                }),
+        },
         OutboxWorker,
         PendingReferenceWorker,
         SqsConsumerWorker,
+        ReconciliationWorker,
     ],
     exports: [PublishOutbox, SqsWagerTransactionConsumer],
 })

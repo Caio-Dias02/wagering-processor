@@ -13,6 +13,8 @@ export interface WalletRepository {
     findByPlayerAndCurrency(playerId: string, currency: string): Promise<Wallet | null>;
     /** Busca travando a linha (SELECT ... FOR UPDATE) até o fim da transação. */
     findByIdForUpdate(id: string): Promise<Wallet | null>;
+    /** Ids em ordem crescente, depois de `afterId` (paginação por chave, estável). */
+    listIds(afterId: string | undefined, limit: number): Promise<string[]>;
     insert(wallet: Wallet): Promise<void>;
     /** Atualiza saldo/version. Falha se a version no banco não for a esperada. */
     save(wallet: Wallet, expectedVersion: number): Promise<void>;
@@ -80,6 +82,15 @@ export interface InboxRepository {
     tryInsert(message: InboxMessage): Promise<boolean>;
 }
 
+export interface ScheduledJobRepository {
+    /**
+     * Reivindica o ciclo atual do job para esta instância. true = esta instância roda;
+     * false = outra já começou o job há menos de `minIntervalMs`.
+     * Usa o relógio do banco: instâncias com relógios diferentes não atrapalham.
+     */
+    tryStart(name: string, minIntervalMs: number): Promise<boolean>;
+}
+
 /** Tudo que o caso de uso pode usar DENTRO de uma transação. */
 export interface TransactionalContext {
     wallets: WalletRepository;
@@ -87,6 +98,7 @@ export interface TransactionalContext {
     ledger: LedgerRepository;
     outbox: OutboxRepository;
     inbox: InboxRepository;
+    jobs: ScheduledJobRepository;
 }
 
 export interface UnitOfWork {

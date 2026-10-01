@@ -4,6 +4,7 @@ import type { TransactionalContext, UnitOfWork } from "../../application/ports/r
 import { MikroOrmInboxRepository } from "./repositories/mikro-orm-inbox.repository";
 import { MikroOrmLedgerRepository } from "./repositories/mikro-orm-ledger.repository";
 import { MikroOrmOutboxRepository } from "./repositories/mikro-orm-outbox.repository";
+import { MikroOrmScheduledJobRepository } from "./repositories/mikro-orm-scheduled-job.repository";
 import { MikroOrmWagerTransactionRepository } from "./repositories/mikro-orm-wager-transaction.repository";
 import { MikroOrmWalletRepository } from "./repositories/mikro-orm-wallet.repository";
 import { isTransientDatabaseError } from "./transient-errors";
@@ -37,5 +38,6 @@ function createContext(em: EntityManager): TransactionalContext {
         ledger: new MikroOrmLedgerRepository(em),
         outbox: new MikroOrmOutboxRepository(em),
         inbox: new MikroOrmInboxRepository(em),
+        jobs: new MikroOrmScheduledJobRepository(em),
     };
 }

@@ -12,6 +12,7 @@ beforeAll(async () => {
     process.env.OUTBOX_WORKER_ENABLED = "false";
     process.env.SQS_CONSUMER_ENABLED = "false";
     process.env.PENDING_REFERENCE_WORKER_ENABLED = "false";
+    process.env.RECONCILIATION_WORKER_ENABLED = "false";
     process.env.LOG_LEVEL = "silent";
     app = await createApp();
     app.useLogger(false); // os 500 de propósito não poluem a saída dos testes

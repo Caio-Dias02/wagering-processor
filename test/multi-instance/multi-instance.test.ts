@@ -25,6 +25,7 @@ class Instance {
                 OUTBOX_WORKER_ENABLED: "true",
                 SQS_CONSUMER_ENABLED: "true",
                 PENDING_REFERENCE_WORKER_ENABLED: "true",
+                RECONCILIATION_WORKER_ENABLED: "true",
                 OUTBOX_POLL_INTERVAL_MS: "100",
                 // instância morta: a mensagem que ela segurava volta para a fila em 3s
                 SQS_VISIBILITY_TIMEOUT_SECONDS: "3",
