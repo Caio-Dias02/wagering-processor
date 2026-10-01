@@ -1,21 +1,18 @@
 import { Money, type MoneyProps } from "../../domain/money/money";
-import { FailureCode } from "../../domain/wager-transaction/failure-code";
+import type { FailureCode } from "../../domain/wager-transaction/failure-code";
 import {
     WagerTransaction,
     WagerTransactionKind,
     type WagerTransactionStatus,
 } from "../../domain/wager-transaction/wager-transaction";
 import { InvalidWagerTransactionError } from "../../domain/wager-transaction/wager-transaction.errors";
-import type { Wallet } from "../../domain/wallet/wallet";
-import { LedgerDirection, type WalletLedgerEntry } from "../../domain/wallet/wallet-ledger-entry";
 import { IdempotencyConflictError, WalletNotFoundError } from "../errors";
-import { eventsForOutcome } from "../messaging/events";
 import { InboxMessage } from "../messaging/inbox-message";
 import type { EventContext } from "../messaging/integration-event";
-import { OutboxMessage } from "../messaging/outbox-message";
 import { payloadHash } from "../payload-hash";
 import type { TransactionalContext, UnitOfWork } from "../ports/repositories";
 import { retryOnConflict } from "../retry";
+import { decideWagerTransaction, recordOutcome } from "../wager-decision";
 
 /** O que chega da API ou da fila (já sem nada de HTTP/SQS). */
 export interface ProcessWagerTransactionCommand {
@@ -138,22 +135,19 @@ export class ProcessWagerTransaction {
             return toResult(existing, true);
         }
 
-        // 3. Decide e aplica.
+        // 3. Decide e aplica. Referência ausente: guarda e o worker tenta depois.
         const expectedVersion = wallet.version;
-        const entry = await this.decide(ctx, wallet, tx);
+        const decision = await decideWagerTransaction(ctx, wallet, tx, tx.createdAt, this.newId);
+        if (decision.kind === "reference-missing") tx.markPendingReference();
+        const entry = decision.kind === "decided" ? decision.entry : undefined;
 
-        // 4. Grava tudo na mesma transação. Ordem importa por causa das FKs:
-        //    transação → wallet → ledger (o ledger aponta para a transação).
+        // 4. Grava tudo na mesma transação: a transação primeiro (o ledger aponta para ela),
+        //    depois saldo + ledger + eventos na outbox. Os eventos só existem se o commit
+        //    acontecer; replay não chega aqui, então não gera evento repetido.
         await ctx.transactions.insert(tx);
-        if (entry) {
-            await ctx.wallets.save(wallet, expectedVersion);
-            await ctx.ledger.insert(entry);
-        }
-
-        // 5. Eventos vão para a outbox NESTA transação: só existem se o commit acontecer.
-        //    Replay não chega aqui, então não gera evento repetido.
-        const events = eventsForOutcome(tx, wallet, entry, { ...trace, occurredAt: tx.createdAt, newId: this.newId });
-        await ctx.outbox.insert(events.map((e) => OutboxMessage.enqueue(e)));
+        await recordOutcome(ctx, tx, wallet, expectedVersion, entry, {
+            ...trace, occurredAt: tx.createdAt, newId: this.newId,
+        });
 
         return toResult(tx, false);
     }
@@ -170,90 +164,6 @@ export class ProcessWagerTransaction {
             );
         }
         return null;
-    }
-
-    /**
-     * Aplica as regras e muda o estado de `tx` (e da wallet, se for o caso).
-     * Devolve o lançamento do ledger, ou undefined se o saldo não mudou.
-     */
-    private async decide(
-        ctx: TransactionalContext,
-        wallet: Wallet,
-        tx: WagerTransaction,
-    ): Promise<WalletLedgerEntry | undefined> {
-        const at = tx.createdAt;
-
-        // Wallet de outro jogador: rejeita SEM expor o saldo dela.
-        if (wallet.playerId !== tx.playerId) {
-            tx.reject(FailureCode.WalletOwnershipMismatch, undefined, at);
-            return undefined;
-        }
-        // Sem saldo também: observed_balance é relido na moeda da TRANSAÇÃO, e aqui
-        // a moeda da wallet é outra (o replay mostraria "100.00 USD" numa wallet BRL).
-        if (wallet.currency !== tx.money.currency) {
-            tx.reject(FailureCode.CurrencyMismatch, undefined, at);
-            return undefined;
-        }
-
-        // Resolve a referência (obrigatória em REFUND/ROLLBACK, opcional em WIN/LOSS).
-        let reference: WagerTransaction | undefined;
-        if (tx.referenceExternalTransactionId) {
-            const found = await ctx.transactions.findByProviderAndExternalId(
-                tx.providerId,
-                tx.referenceExternalTransactionId,
-            );
-            // Ainda não chegou (ou chegou e está esperando a dela): guarda e tenta depois.
-            if (!found || !found.isTerminal()) {
-                tx.markPendingReference();
-                return undefined;
-            }
-
-            const problem = tx.checkReference(found) ?? (await this.checkNotReversed(ctx, found));
-            if (problem) {
-                tx.reject(problem, wallet.balance, at);
-                return undefined;
-            }
-            reference = found;
-        }
-
-        if (!tx.affectsBalance()) {
-            tx.markProcessed(reference?.id, wallet.balance, at);
-            return undefined;
-        }
-
-        const direction = tx.ledgerDirectionFor(reference);
-        if (direction === LedgerDirection.Debit && wallet.balance.isLessThan(tx.money)) {
-            const code = tx.isReversal() ? FailureCode.ReversalInsufficientFunds : FailureCode.InsufficientFunds;
-            tx.reject(code, wallet.balance, at);
-            return undefined;
-        }
-        if (direction === LedgerDirection.Credit && !wallet.canCredit(tx.money)) {
-            tx.reject(FailureCode.BalanceLimitExceeded, wallet.balance, at);
-            return undefined;
-        }
-
-        const movement = { entryId: this.newId(), transactionId: tx.id, money: tx.money, at };
-        const entry = direction === LedgerDirection.Debit ? wallet.debit(movement) : wallet.credit(movement);
-        tx.markProcessed(reference?.id, wallet.balance, at);
-        return entry;
-    }
-
-    /**
-     * Referência já revertida não aceita mais nada:
-     *  - outra reversão, de QUALQUER tipo. O enunciado fala em "pelo mesmo tipo", mas
-     *    REFUND depois de ROLLBACK da mesma BET devolveria o dinheiro duas vezes;
-     *  - WIN/LOSS: não se liquida uma aposta que já foi cancelada.
-     */
-    private async checkNotReversed(
-        ctx: TransactionalContext,
-        reference: WagerTransaction,
-    ): Promise<FailureCode | undefined> {
-        for (const kind of [WagerTransactionKind.Refund, WagerTransactionKind.Rollback]) {
-            if (await ctx.transactions.hasProcessedReversal(reference.id, kind)) {
-                return FailureCode.ReferenceAlreadyReversed;
-            }
-        }
-        return undefined;
     }
 }
 
