@@ -1,4 +1,5 @@
-import type { EntityManager, MikroORM } from "@mikro-orm/postgresql";
+import { type EntityManager, type MikroORM, UniqueConstraintViolationException } from "@mikro-orm/postgresql";
+import { ConcurrencyConflictError } from "../../application/errors";
 import type { TransactionalContext, UnitOfWork } from "../../application/ports/repositories";
 import { MikroOrmLedgerRepository } from "./repositories/mikro-orm-ledger.repository";
 import { MikroOrmWagerTransactionRepository } from "./repositories/mikro-orm-wager-transaction.repository";
@@ -7,9 +8,19 @@ import { MikroOrmWalletRepository } from "./repositories/mikro-orm-wallet.reposi
 export class MikroOrmUnitOfWork implements UnitOfWork {
     constructor(private readonly orm: MikroORM) { }
 
-    run<T>(work: (ctx: TransactionalContext) => Promise<T>): Promise<T> {
-        // fork: um EntityManager novinho, isolado, para cada transação
-        return this.orm.em.fork().transactional((em) => work(createContext(em)));
+    async run<T>(work: (ctx: TransactionalContext) => Promise<T>): Promise<T> {
+        try {
+            // fork: um EntityManager novinho, isolado, para cada transação
+            return await this.orm.em.fork().transactional((em) => work(createContext(em)));
+        } catch (error) {
+            // Unique estourou = outra transação gravou primeiro. A aplicação não conhece
+            // o MikroORM, então traduzimos para um erro dela, que diz "pode repetir".
+            if (error instanceof UniqueConstraintViolationException) {
+                const constraint = (error as { constraint?: string }).constraint ?? "unknown";
+                throw new ConcurrencyConflictError(`Unique constraint violated: ${constraint}`, { cause: error });
+            }
+            throw error;
+        }
     }
 }
 
