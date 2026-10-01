@@ -35,6 +35,7 @@ import { SqsConsumerWorker } from "./sqs-consumer.worker";
                         deadLetterQueueName: sqsConfig.deadLetterQueueName,
                         consumerName: "wager-transactions-consumer",
                         waitTimeSeconds: 10,
+                        visibilityTimeoutSeconds: sqsConfig.visibilityTimeoutSeconds,
                         retryDelaySeconds: defaultRetryDelaySeconds,
                     },
                     observability,

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
     ChangeMessageVisibilityCommand,
     GetQueueAttributesCommand,
@@ -20,6 +20,9 @@ import { SqsWagerTransactionConsumer } from "../../src/infrastructure/messaging/
 import { createSqsClient, sqsConfig } from "../../src/infrastructure/messaging/sqs.config";
 
 const CONSUMER = "wager-transactions-consumer";
+
+// Esperar mensagens voltarem por visibility timeout leva alguns segundos.
+setDefaultTimeout(20_000);
 
 let orm: MikroORM;
 let sqs: SQSClient;
@@ -98,11 +101,16 @@ async function send(body: unknown, groupId: string, deduplicationId = Bun.random
     }));
 }
 
-/** Consome até a fila ficar vazia (dois polls seguidos sem mensagem). */
+/**
+ * Consome até a fila ficar vazia DE VERDADE: sem mensagens visíveis nem em voo.
+ * Só "dois polls vazios" não basta: uma mensagem pode estar invisível por um receive
+ * abandonado (ex.: long polling de um processo que acabou de desligar) e voltar depois.
+ */
 async function drain(consumer: SqsWagerTransactionConsumer, maxPolls = 30) {
     let empty = 0;
-    for (let i = 0; i < maxPolls && empty < 2; i++) {
+    for (let i = 0; i < maxPolls; i++) {
         empty = (await consumer.pollOnce()) === 0 ? empty + 1 : 0;
+        if (empty >= 2 && (await queueDepth(queueUrl)) === 0) return;
     }
 }
 

@@ -25,6 +25,9 @@ export interface SqsWagerConsumerOptions {
     consumerName: string;
     /** Long polling: quanto tempo o receive espera por mensagens (máx. 20). */
     waitTimeSeconds: number;
+    /** Por quanto tempo uma mensagem recebida fica invisível para os outros consumers. Se o
+     *  processo morrer, é o tempo até ela voltar para a fila. Ausente: o padrão da fila (30s). */
+    visibilityTimeoutSeconds?: number;
     /** Quanto tempo a mensagem fica invisível antes de tentar de novo, por nº de recebimentos. */
     retryDelaySeconds: (receiveCount: number) => number;
 }
@@ -76,6 +79,7 @@ export class SqsWagerTransactionConsumer {
                     QueueUrl: queueUrl,
                     MaxNumberOfMessages: 10,
                     WaitTimeSeconds: this.options.waitTimeSeconds,
+                    VisibilityTimeout: this.options.visibilityTimeoutSeconds,
                     MessageSystemAttributeNames: ["ApproximateReceiveCount", "MessageGroupId"],
                 }),
                 { abortSignal: this.abort.signal },

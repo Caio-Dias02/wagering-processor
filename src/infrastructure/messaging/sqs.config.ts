@@ -6,6 +6,9 @@ export const sqsConfig = {
     region: process.env.AWS_REGION ?? "us-east-1",
     inputQueueName: process.env.SQS_INPUT_QUEUE ?? "wager-transactions.fifo",
     deadLetterQueueName: process.env.SQS_DLQ ?? "wager-transactions-dlq.fifo",
+    visibilityTimeoutSeconds: process.env.SQS_VISIBILITY_TIMEOUT_SECONDS
+        ? Number(process.env.SQS_VISIBILITY_TIMEOUT_SECONDS)
+        : undefined,
     eventsQueueName: process.env.SQS_EVENTS_QUEUE ?? "wagering-events.fifo",
 };
 
